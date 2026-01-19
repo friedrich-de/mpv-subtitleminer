@@ -64,14 +64,119 @@ impl MediaType {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ImageFormat {
+    Jpeg,
+    Webp,
+    Avif,
+}
+
+impl ImageFormat {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" => Some(Self::Jpeg),
+            "webp" => Some(Self::Webp),
+            "avif" => Some(Self::Avif),
+            _ => None,
+        }
+    }
+
+    pub fn ext(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+            Self::Avif => "avif",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+            Self::Avif => "image/avif",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageOptions {
+    pub format: ImageFormat,
+    pub quality: Option<u8>,
+}
+
+impl Default for ImageOptions {
+    fn default() -> Self {
+        Self {
+            format: ImageFormat::Jpeg,
+            quality: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AudioFormat {
+    Mp3,
+    Opus,
+}
+
+impl AudioFormat {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "mp3" => Some(Self::Mp3),
+            "opus" => Some(Self::Opus),
+            _ => None,
+        }
+    }
+
+    pub fn ext(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Opus => "opus",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Mp3 => "audio/mpeg",
+            Self::Opus => "audio/ogg",
+        }
+    }
+
+    pub fn default_bitrate(self) -> &'static str {
+        match self {
+            Self::Mp3 => "128k",
+            Self::Opus => "96k",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioOptions {
+    pub format: AudioFormat,
+    pub bitrate: Option<String>,
+    pub filters: Option<String>,
+}
+
+impl Default for AudioOptions {
+    fn default() -> Self {
+        Self {
+            format: AudioFormat::Mp3,
+            bitrate: None,
+            filters: None,
+        }
+    }
+}
+
 pub struct FfmpegRequest {
     output_path: PathBuf,
     args: Vec<String>,
+    ext: String,
+    mime: String,
 }
 
 impl FfmpegRequest {
-    pub fn thumbnail(sub: &Subtitle) -> Self {
-        let output = temp_path("thumb", "jpg");
+    pub fn thumbnail(sub: &Subtitle, options: ImageOptions) -> Self {
+        let output = temp_path("thumb", options.format.ext());
         let mid_time = (sub.sub_start + sub.sub_end) / 2.0;
 
         debug!(
@@ -79,31 +184,76 @@ impl FfmpegRequest {
             mid_time, sub.media_path
         );
 
+        let mut args = vec![
+            "-ss".into(),
+            format!("{:.3}", mid_time),
+            "-i".into(),
+            sub.media_path.clone(),
+            "-vframes".into(),
+            "1".into(),
+            "-vf".into(),
+            "scale=640:-2".into(),
+        ];
+
+        match options.format {
+            ImageFormat::Jpeg => {
+                args.extend(["-q:v".into(), "5".into()]);
+            }
+            ImageFormat::Webp => {
+                let quality = options.quality.unwrap_or(80);
+                args.extend([
+                    "-c:v".into(),
+                    "libwebp".into(),
+                    "-q:v".into(),
+                    quality.to_string(),
+                ]);
+            }
+            ImageFormat::Avif => {
+                args.extend([
+                    "-c:v".into(),
+                    "libaom-av1".into(),
+                    "-still-picture".into(),
+                    "1".into(),
+                    "-crf".into(),
+                    "35".into(),
+                    "-b:v".into(),
+                    "0".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                    "-f".into(),
+                    "avif".into(),
+                ]);
+            }
+        }
+
+        args.extend(["-y".into(), output.display().to_string()]);
+
         Self {
-            args: vec![
-                "-ss".into(),
-                format!("{:.3}", mid_time),
-                "-i".into(),
-                sub.media_path.clone(),
-                "-vframes".into(),
-                "1".into(),
-                "-vf".into(),
-                "scale=640:-2".into(),
-                "-q:v".into(),
-                "5".into(),
-                "-y".into(),
-                output.display().to_string(),
-            ],
+            args,
             output_path: output,
+            ext: options.format.ext().to_string(),
+            mime: options.format.mime().to_string(),
         }
     }
 
-    pub fn audio(sub: &Subtitle) -> Self {
-        Self::audio_range(sub.sub_start, sub.sub_end, &sub.media_path, sub.aid)
+    pub fn audio(sub: &Subtitle, options: AudioOptions) -> Self {
+        Self::audio_range(
+            sub.sub_start,
+            sub.sub_end,
+            &sub.media_path,
+            sub.aid,
+            options,
+        )
     }
 
-    pub fn audio_range(sub_start: f64, sub_end: f64, media_path: &str, aid: i64) -> Self {
-        let output = temp_path("audio", "mp3");
+    pub fn audio_range(
+        sub_start: f64,
+        sub_end: f64,
+        media_path: &str,
+        aid: i64,
+        options: AudioOptions,
+    ) -> Self {
+        let output = temp_path("audio", options.format.ext());
         let start = (sub_start - AUDIO_PADDING).max(0.0);
         let duration = sub_end - sub_start + AUDIO_PADDING * 2.0;
 
@@ -114,33 +264,68 @@ impl FfmpegRequest {
             media_path
         );
 
+        let mut args = vec![
+            "-ss".into(),
+            format!("{:.3}", start),
+            "-i".into(),
+            media_path.to_string(),
+            "-t".into(),
+            format!("{:.3}", duration),
+            "-map".into(),
+            format!("0:a:{}", (aid - 1).max(0)),
+            "-vn".into(),
+            "-ac".into(),
+            "2".into(),
+        ];
+
+        if let Some(filters) = options.filters.as_ref().filter(|value| !value.trim().is_empty()) {
+            args.extend(["-af".into(), filters.to_string()]);
+        }
+
+        match options.format {
+            AudioFormat::Mp3 => {
+                args.extend(["-c:a".into(), "libmp3lame".into()]);
+            }
+            AudioFormat::Opus => {
+                args.extend(["-c:a".into(), "libopus".into(), "-f".into(), "ogg".into()]);
+            }
+        }
+
+        let bitrate = options
+            .bitrate
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(options.format.default_bitrate());
+
+        args.extend(["-b:a".into(), bitrate.to_string()]);
+        args.extend(["-y".into(), output.display().to_string()]);
+
         Self {
-            args: vec![
-                "-ss".into(),
-                format!("{:.3}", start),
-                "-i".into(),
-                media_path.to_string(),
-                "-t".into(),
-                format!("{:.3}", duration),
-                "-map".into(),
-                format!("0:a:{}", (aid - 1).max(0)),
-                "-vn".into(),
-                "-ac".into(),
-                "2".into(),
-                "-b:a".into(),
-                "128k".into(),
-                "-y".into(),
-                output.display().to_string(),
-            ],
+            args,
             output_path: output,
+            ext: options.format.ext().to_string(),
+            mime: options.format.mime().to_string(),
         }
     }
 
-    pub fn from_type(media_type: MediaType, sub: &Subtitle) -> Self {
+    pub fn from_type(
+        media_type: MediaType,
+        sub: &Subtitle,
+        image: ImageOptions,
+        audio: AudioOptions,
+    ) -> Self {
         match media_type {
-            MediaType::Thumbnail => Self::thumbnail(sub),
-            MediaType::Audio => Self::audio(sub),
+            MediaType::Thumbnail => Self::thumbnail(sub, image),
+            MediaType::Audio => Self::audio(sub, audio),
         }
+    }
+
+    pub fn ext(&self) -> &str {
+        &self.ext
+    }
+
+    pub fn mime(&self) -> &str {
+        &self.mime
     }
 
     pub fn execute(self) -> Option<String> {

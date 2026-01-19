@@ -7,7 +7,7 @@ use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use crate::media::{FfmpegRequest, MediaType};
+use crate::media::{AudioFormat, AudioOptions, FfmpegRequest, ImageFormat, ImageOptions, MediaType};
 use crate::mpv_stream::MpvStream;
 
 #[derive(Clone)]
@@ -331,6 +331,56 @@ async fn handle_client(
     }
 }
 
+fn parse_string_option(json: &serde_json::Value, key: &str) -> Option<String> {
+    json.get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn parse_quality_option(json: &serde_json::Value, key: &str) -> Option<u8> {
+    let raw = json.get(key)?;
+    let parsed = match raw {
+        serde_json::Value::Number(num) => num.as_u64().and_then(|value| u8::try_from(value).ok()),
+        serde_json::Value::String(value) => value.parse::<u8>().ok(),
+        _ => None,
+    }?;
+
+    if parsed <= 100 {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn parse_image_options(json: &serde_json::Value) -> ImageOptions {
+    let mut options = ImageOptions::default();
+    if let Some(format) = json
+        .get("image_format")
+        .and_then(|value| value.as_str())
+        .and_then(ImageFormat::from_str)
+    {
+        options.format = format;
+    }
+    options.quality = parse_quality_option(json, "image_quality");
+    options
+}
+
+fn parse_audio_options(json: &serde_json::Value) -> AudioOptions {
+    let mut options = AudioOptions::default();
+    if let Some(format) = json
+        .get("audio_format")
+        .and_then(|value| value.as_str())
+        .and_then(AudioFormat::from_str)
+    {
+        options.format = format;
+    }
+    options.bitrate = parse_string_option(json, "audio_bitrate");
+    options.filters = parse_string_option(json, "audio_filters");
+    options
+}
+
 async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(text).ok()?;
     let request_type = json.get("request")?.as_str()?;
@@ -339,12 +389,18 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
     if request_type == "audio_range" {
         let start_id = json.get("start_id")?.as_u64()?;
         let end_id = json.get("end_id")?.as_u64()?;
+        let audio_options = parse_audio_options(&json);
 
         let store = state.subtitles.read().await;
         let start = store.get(&start_id)?;
         let end = store.get(&end_id)?;
-        let request =
-            FfmpegRequest::audio_range(start.sub_start, end.sub_end, &start.media_path, start.aid);
+        let request = FfmpegRequest::audio_range(
+            start.sub_start,
+            end.sub_end,
+            &start.media_path,
+            start.aid,
+            audio_options,
+        );
         drop(store);
 
         info!(
@@ -352,6 +408,8 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
             client_id, start_id, end_id
         );
 
+        let ext = request.ext().to_string();
+        let mime = request.mime().to_string();
         let data = tokio::task::spawn_blocking(move || request.execute())
             .await
             .ok()?;
@@ -362,6 +420,8 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
                 "start_id": start_id,
                 "end_id": end_id,
                 "data": data,
+                "ext": ext,
+                "mime": mime,
             })
             .to_string(),
         );
@@ -370,17 +430,21 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
     // Handle single-subtitle requests (thumbnail, audio)
     let subtitle_id = json.get("id")?.as_u64()?;
     let media_type = MediaType::from_str(request_type)?;
+    let image_options = parse_image_options(&json);
+    let audio_options = parse_audio_options(&json);
     let store = state.subtitles.read().await;
     let sub = store.get(&subtitle_id)?.clone();
     drop(store);
 
-    let request = FfmpegRequest::from_type(media_type, &sub);
+    let request = FfmpegRequest::from_type(media_type, &sub, image_options, audio_options);
     info!(
         "[client:{}] Requesting {} for subtitle {}",
         client_id, request_type, subtitle_id
     );
 
     let req_type = request_type.to_string();
+    let ext = request.ext().to_string();
+    let mime = request.mime().to_string();
     let data = tokio::task::spawn_blocking(move || request.execute())
         .await
         .ok()?;
@@ -399,6 +463,8 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
             "type": req_type,
             "id": subtitle_id,
             "data": data,
+            "ext": ext,
+            "mime": mime,
         })
         .to_string(),
     )

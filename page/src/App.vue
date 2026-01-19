@@ -22,15 +22,35 @@
     ports: number[]
   }
 
+  type ImageFormat = 'jpg' | 'webp' | 'avif'
+  type AudioFormat = 'mp3' | 'opus'
+
+  interface MediaSettings {
+    image: {
+      format: ImageFormat
+      quality: number
+    }
+    audio: {
+      format: AudioFormat
+      bitrate: string
+      filters: string
+    }
+  }
+
   interface Settings {
     anki: AnkiSettings
     connection: ConnectionSettings
+    media: MediaSettings
   }
 
   const STORAGE_KEY = 'mpv_subtitle_tool_settings'
   const defaultSettings: Settings = {
     anki: { noteType: '', frontField: '', sentenceField: '', audioField: '', imageField: '' },
     connection: { host: '127.0.0.1', ports: [...DEFAULT_PORTS] },
+    media: {
+      image: { format: 'jpg', quality: 80 },
+      audio: { format: 'mp3', bitrate: '', filters: '' },
+    },
   }
 
   function loadSettings(): Settings {
@@ -43,6 +63,12 @@
           ...parsed,
           anki: { ...defaultSettings.anki, ...parsed.anki },
           connection: { ...defaultSettings.connection, ...parsed.connection },
+          media: {
+            ...defaultSettings.media,
+            ...parsed.media,
+            image: { ...defaultSettings.media.image, ...parsed.media?.image },
+            audio: { ...defaultSettings.media.audio, ...parsed.media?.audio },
+          },
         }
       }
     } catch (err) {
@@ -52,6 +78,11 @@
   }
 
   const settings = ref<Settings>(loadSettings())
+
+  const cloneMediaSettings = (source: MediaSettings): MediaSettings => ({
+    image: { ...source.image },
+    audio: { ...source.audio },
+  })
 
   watch(
     settings,
@@ -79,20 +110,17 @@
   const loadingModels = ref(false)
   const modelsError = ref<string | null>(null)
   const localSettings = ref<AnkiSettings>({ ...settings.value.anki })
+  const localMediaSettings = ref<MediaSettings>(cloneMediaSettings(settings.value.media))
 
   const modelNames = computed(() => Object.keys(modelsWithFields.value).sort())
   const availableFields = computed(() => {
     const model = localSettings.value.noteType
     return model ? (modelsWithFields.value[model] ?? []) : []
   })
-  const settingsValid = computed(() => {
-    const { noteType, sentenceField, audioField, imageField } = localSettings.value
-    return !!noteType && (!!sentenceField || !!audioField || !!imageField)
-  })
-
   watch(showSettings, (isOpen) => {
     if (isOpen) {
       localSettings.value = { ...settings.value.anki }
+      localMediaSettings.value = cloneMediaSettings(settings.value.media)
       if (connectionStatus.value === 'untested') {
         void testConnection()
       }
@@ -145,6 +173,7 @@
 
   function saveSettings() {
     settings.value.anki = { ...localSettings.value }
+    settings.value.media = cloneMediaSettings(localMediaSettings.value)
     showSettings.value = false
     toast.success('Settings saved')
   }
@@ -160,9 +189,24 @@
     sub_start: number
     sub_end: number
     thumbnail?: string
+    thumbnailExt?: string
+    thumbnailMime?: string
     audio?: string
+    audioExt?: string
+    audioMime?: string
     sourcePort: number
     uid: string
+  }
+
+  type MediaInfo = {
+    data: string
+    ext: string
+    mime: string
+  }
+
+  type AudioRangeInfo = MediaInfo & {
+    startId: number
+    endId: number
   }
 
   const messages = ref<SubtitleMessage[]>([])
@@ -171,12 +215,7 @@
   const loadingMedia = ref<Record<string, boolean>>({})
   const selectedMessages = ref<Set<string>>(new Set())
   const currentAudio = ref<HTMLAudioElement | null>(null)
-  const pendingAudioRange = ref<{
-    startId: number
-    endId: number
-    data: string
-    port: number
-  } | null>(null)
+  const pendingAudioRange = ref<(AudioRangeInfo & { port: number }) | null>(null)
   const selectionBarRef = ref<HTMLElement | null>(null)
   const selectionBarHeight = ref(0)
   let selectionBarObserver: ResizeObserver | null = null
@@ -240,16 +279,20 @@
       }
 
       if (type === 'thumbnail' || type === 'audio') {
-        const media = parseMediaMessage(d)
+        const media = parseMediaMessage(d, type)
         if (!media) return
 
         const msg = messages.value.find((m) => m.id === media.id && m.sourcePort === port)
         if (msg) {
           if (type === 'thumbnail') {
             msg.thumbnail = media.data
+            msg.thumbnailExt = media.ext
+            msg.thumbnailMime = media.mime
           } else {
             msg.audio = media.data
-            playAudio(media.data)
+            msg.audioExt = media.ext
+            msg.audioMime = media.mime
+            playAudio(media.data, media.mime)
           }
         }
         const key = `${type === 'thumbnail' ? 'thumb' : 'audio'}-${port}-${media.id}`
@@ -325,21 +368,123 @@
     return { id, subtitle, time_pos: normalizedTimePos, sub_start, sub_end, sourcePort: port, uid }
   }
 
-  function parseMediaMessage(d: JsonObject): { id: number; data: string } | null {
+  function parseMediaMessage(
+    d: JsonObject,
+    type: 'thumbnail' | 'audio',
+  ): ({ id: number } & MediaInfo) | null {
     const id = asNumber(d.id)
     const data = asString(d.data)
     if (id === null || data === null) return null
-    return { id, data }
+    const ext = asString(d.ext)
+    const mime = asString(d.mime)
+    if (type === 'thumbnail') {
+      const format = settings.value.media.image.format
+      return {
+        id,
+        data,
+        ext: ext ?? format,
+        mime: mime ?? imageMimeMap[format],
+      }
+    }
+    const format = settings.value.media.audio.format
+    return {
+      id,
+      data,
+      ext: ext ?? format,
+      mime: mime ?? audioMimeMap[format],
+    }
   }
 
-  function parseAudioRangeMessage(
-    d: JsonObject,
-  ): { startId: number; endId: number; data: string } | null {
+  function parseAudioRangeMessage(d: JsonObject): AudioRangeInfo | null {
     const startId = asNumber(d.start_id)
     const endId = asNumber(d.end_id)
     const data = asString(d.data)
     if (startId === null || endId === null || data === null) return null
-    return { startId, endId, data }
+    const ext = asString(d.ext)
+    const mime = asString(d.mime)
+    const format = settings.value.media.audio.format
+    return {
+      startId,
+      endId,
+      data,
+      ext: ext ?? format,
+      mime: mime ?? audioMimeMap[format],
+    }
+  }
+
+  const imageMimeMap: Record<ImageFormat, string> = {
+    jpg: 'image/jpeg',
+    webp: 'image/webp',
+    avif: 'image/avif',
+  }
+  const audioMimeMap: Record<AudioFormat, string> = {
+    mp3: 'audio/mpeg',
+    opus: 'audio/ogg',
+  }
+
+  const getMessageMediaInfo = (
+    msg: SubtitleMessage,
+    type: 'thumbnail' | 'audio',
+  ): MediaInfo | undefined => {
+    if (type === 'thumbnail' && msg.thumbnail) {
+      const format = settings.value.media.image.format
+      return {
+        data: msg.thumbnail,
+        ext: msg.thumbnailExt ?? format,
+        mime: msg.thumbnailMime ?? imageMimeMap[format],
+      }
+    }
+    if (type === 'audio' && msg.audio) {
+      const format = settings.value.media.audio.format
+      return {
+        data: msg.audio,
+        ext: msg.audioExt ?? format,
+        mime: msg.audioMime ?? audioMimeMap[format],
+      }
+    }
+    return undefined
+  }
+
+  const buildThumbnailRequest = (id: number): JsonObject => {
+    const { format, quality } = settings.value.media.image
+    const payload: JsonObject = { request: 'thumbnail', id, image_format: format }
+    if (format === 'webp' && Number.isFinite(quality) && quality >= 0 && quality <= 100) {
+      payload.image_quality = Math.round(quality)
+    }
+    return payload
+  }
+
+  const buildAudioRequest = (id: number): JsonObject => {
+    const { format, bitrate, filters } = settings.value.media.audio
+    const payload: JsonObject = { request: 'audio', id, audio_format: format }
+    const trimmedBitrate = bitrate.trim()
+    if (trimmedBitrate) {
+      payload.audio_bitrate = trimmedBitrate
+    }
+    const trimmedFilters = filters.trim()
+    if (trimmedFilters) {
+      payload.audio_filters = trimmedFilters
+    }
+    return payload
+  }
+
+  const buildAudioRangeRequest = (startId: number, endId: number): JsonObject => {
+    const { format, bitrate, filters } = settings.value.media.audio
+    const payload: JsonObject = {
+      request: 'audio_range',
+      start_id: startId,
+      end_id: endId,
+      audio_format: format,
+    }
+    const trimmedBitrate = bitrate.trim()
+    if (trimmedBitrate) {
+      payload.audio_bitrate = trimmedBitrate
+    }
+    const trimmedFilters = filters.trim()
+    if (trimmedFilters) {
+      payload.audio_filters = trimmedFilters
+    }
+    return payload
   }
 
   const isSelected = (uid: string) => selectedMessages.value.has(uid)
@@ -473,7 +618,7 @@
     if (ws.status.value !== 'connected' || msg.thumbnail) return
     const key = `thumb-${msg.uid}`
     if (loadingMedia.value[key]) return
-    if (!sendToPort({ request: 'thumbnail', id: msg.id }, msg.sourcePort)) {
+    if (!sendToPort(buildThumbnailRequest(msg.id), msg.sourcePort)) {
       toast.error(`Not connected to port ${msg.sourcePort}`)
       return
     }
@@ -483,12 +628,12 @@
   const requestAudio = (msg: SubtitleMessage) => {
     if (ws.status.value !== 'connected') return
     if (msg.audio) {
-      playAudio(msg.audio)
+      playAudio(msg.audio, msg.audioMime)
       return
     }
     const key = `audio-${msg.uid}`
     if (loadingMedia.value[key]) return
-    if (!sendToPort({ request: 'audio', id: msg.id }, msg.sourcePort)) {
+    if (!sendToPort(buildAudioRequest(msg.id), msg.sourcePort)) {
       toast.error(`Not connected to port ${msg.sourcePort}`)
       return
     }
@@ -509,16 +654,17 @@
 
     const audioData = await requestAudioRange(range.first.id, range.last.id, selectionPort)
     if (audioData) {
-      playAudio(audioData)
+      playAudio(audioData.data, audioData.mime)
     }
   }
 
-  const playAudio = (audioBase64: string) => {
+  const playAudio = (audioBase64: string, mime?: string) => {
     if (currentAudio.value) {
       currentAudio.value.pause()
       currentAudio.value = null
     }
-    const audio = new Audio(`data:audio/mpeg;base64,${audioBase64}`)
+    const resolvedMime = mime ?? audioMimeMap[settings.value.media.audio.format]
+    const audio = new Audio(`data:${resolvedMime};base64,${audioBase64}`)
     currentAudio.value = audio
     audio.addEventListener('ended', () => {
       if (currentAudio.value === audio) {
@@ -528,9 +674,8 @@
     void audio.play()
   }
 
-  const generateMediaFilename = (msgId: number, type: 'audio' | 'image') => {
+  const generateMediaFilename = (msgId: number, ext: string) => {
     const timestamp = Date.now()
-    const ext = type === 'audio' ? 'mp3' : 'jpg'
     return `mpv_subtitleminer_${msgId}_${timestamp}.${ext}`
   }
 
@@ -575,23 +720,23 @@
         let audioData =
           selectedMsgs.length > 1
             ? await requestAudioRange(first.id, last.id, first.sourcePort)
-            : first.audio || (await requestMediaFromServer(first, 'audio'))
+            : getMessageMediaInfo(first, 'audio') ?? (await requestMediaFromServer(first, 'audio'))
 
         if (audioData) {
-          const filename = generateMediaFilename(primaryId, 'audio')
-          await anki.storeMediaFile(filename, audioData)
+          const filename = generateMediaFilename(primaryId, audioData.ext)
+          await anki.storeMediaFile(filename, audioData.data)
           fieldUpdates[audioField] = `[sound:${filename}]`
         }
       }
 
       if (imageField) {
-        let imageData = first.thumbnail
+        let imageData = getMessageMediaInfo(first, 'thumbnail')
         if (!imageData) {
           imageData = await requestMediaFromServer(first, 'thumbnail')
         }
         if (imageData) {
-          const filename = generateMediaFilename(primaryId, 'image')
-          await anki.storeMediaFile(filename, imageData)
+          const filename = generateMediaFilename(primaryId, imageData.ext)
+          await anki.storeMediaFile(filename, imageData.data)
           fieldUpdates[imageField] = `<img src="${filename}">`
         }
       }
@@ -626,7 +771,7 @@
   const requestMediaFromServer = (
     msg: SubtitleMessage,
     type: 'audio' | 'thumbnail',
-  ): Promise<string | undefined> => {
+  ): Promise<MediaInfo | undefined> => {
     return new Promise((resolve) => {
       if (ws.status.value !== 'connected') {
         resolve(undefined)
@@ -636,12 +781,10 @@
       const key = `${type === 'thumbnail' ? 'thumb' : 'audio'}-${msg.uid}`
       if (loadingMedia.value[key]) {
         const checkInterval = setInterval(() => {
-          if (type === 'thumbnail' && msg.thumbnail) {
+          const media = getMessageMediaInfo(msg, type)
+          if (media) {
             clearInterval(checkInterval)
-            resolve(msg.thumbnail)
-          } else if (type === 'audio' && msg.audio) {
-            clearInterval(checkInterval)
-            resolve(msg.audio)
+            resolve(media)
           } else if (!loadingMedia.value[key]) {
             clearInterval(checkInterval)
             resolve(undefined)
@@ -650,32 +793,31 @@
 
         setTimeout(() => {
           clearInterval(checkInterval)
-          resolve(type === 'thumbnail' ? msg.thumbnail : msg.audio)
+          resolve(getMessageMediaInfo(msg, type) ?? undefined)
         }, 10000)
         return
       }
 
       loadingMedia.value[key] = true
-      if (!sendToPort({ request: type, id: msg.id }, msg.sourcePort)) {
+      const payload = type === 'thumbnail' ? buildThumbnailRequest(msg.id) : buildAudioRequest(msg.id)
+      if (!sendToPort(payload, msg.sourcePort)) {
         delete loadingMedia.value[key]
         resolve(undefined)
         return
       }
 
       const checkInterval = setInterval(() => {
-        if (type === 'thumbnail' && msg.thumbnail) {
+        const media = getMessageMediaInfo(msg, type)
+        if (media) {
           clearInterval(checkInterval)
-          resolve(msg.thumbnail)
-        } else if (type === 'audio' && msg.audio) {
-          clearInterval(checkInterval)
-          resolve(msg.audio)
+          resolve(media)
         }
       }, 100)
 
       setTimeout(() => {
         clearInterval(checkInterval)
         delete loadingMedia.value[key]
-        resolve(type === 'thumbnail' ? msg.thumbnail : msg.audio)
+        resolve(getMessageMediaInfo(msg, type) ?? undefined)
       }, 10000)
     })
   }
@@ -684,7 +826,7 @@
     startId: number,
     endId: number,
     port: number,
-  ): Promise<string | undefined> => {
+  ): Promise<MediaInfo | undefined> => {
     return new Promise((resolve) => {
       if (ws.status.value !== 'connected') {
         resolve(undefined)
@@ -703,7 +845,7 @@
           ) {
             clearInterval(checkInterval)
             pendingAudioRange.value = null
-            resolve(result.data)
+            resolve({ data: result.data, ext: result.ext, mime: result.mime })
           } else if (!loadingMedia.value[key]) {
             clearInterval(checkInterval)
             resolve(undefined)
@@ -718,7 +860,7 @@
       }
 
       loadingMedia.value[key] = true
-      if (!sendToPort({ request: 'audio_range', start_id: startId, end_id: endId }, port)) {
+      if (!sendToPort(buildAudioRangeRequest(startId, endId), port)) {
         delete loadingMedia.value[key]
         resolve(undefined)
         return
@@ -734,7 +876,7 @@
         ) {
           clearInterval(checkInterval)
           pendingAudioRange.value = null
-          resolve(result.data)
+          resolve({ data: result.data, ext: result.ext, mime: result.mime })
         }
       }, 100)
 
@@ -832,7 +974,10 @@
                 v-if="hoveredThumbnailUid === message.uid && message.thumbnail"
                 class="thumb-preview"
               >
-                <img :src="`data:image/jpeg;base64,${message.thumbnail}`" alt="Thumbnail" />
+                <img
+                  :src="`data:${message.thumbnailMime ?? imageMimeMap[settings.media.image.format]};base64,${message.thumbnail}`"
+                  alt="Thumbnail"
+                />
               </div>
             </div>
             <button
@@ -1045,11 +1190,62 @@
                 <div v-else-if="modelsError" class="error-text">{{ modelsError }}</div>
               </div>
             </section>
+
+            <section class="section">
+              <div class="section-header">
+                <h3>Media</h3>
+              </div>
+              <div class="form-grid">
+                <label class="form-group">
+                  <span>Image format</span>
+                  <select v-model="localMediaSettings.image.format">
+                    <option value="jpg">JPEG</option>
+                    <option value="webp">WebP</option>
+                    <option value="avif">AVIF</option>
+                  </select>
+                </label>
+                <label class="form-group">
+                  <span>Image quality (WebP)</span>
+                  <input
+                    v-model.number="localMediaSettings.image.quality"
+                    type="number"
+                    min="0"
+                    max="100"
+                  />
+                  <small class="field-hint">0-100, used for WebP encoding</small>
+                </label>
+                <label class="form-group">
+                  <span>Audio format</span>
+                  <select v-model="localMediaSettings.audio.format">
+                    <option value="mp3">MP3</option>
+                    <option value="opus">Opus</option>
+                  </select>
+                </label>
+                <label class="form-group">
+                  <span>Audio bitrate</span>
+                  <input
+                    v-model="localMediaSettings.audio.bitrate"
+                    type="text"
+                    placeholder="128k"
+                  />
+                  <small class="field-hint">Leave blank for defaults (128k / 96k).</small>
+                </label>
+                <label class="form-group">
+                  <span>Audio filters (ffmpeg -af)</span>
+                  <input
+                    v-model="localMediaSettings.audio.filters"
+                    type="text"
+                    placeholder="loudnorm=I=-16:TP=-1.5:LRA=11"
+                  />
+                  <small class="field-hint">Optional, for example loudnorm=…</small>
+                </label>
+              </div>
+            </section>
           </div>
 
           <footer class="modal-footer">
             <button class="btn ghost" @click="cancelSettings">Cancel</button>
-            <button class="btn primary" :disabled="!settingsValid" @click="saveSettings">
+            <button class="btn primary" @click="saveSettings">
               Save
             </button>
           </footer>
