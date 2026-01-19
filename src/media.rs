@@ -204,7 +204,7 @@ impl FfmpegRequest {
                 args.extend([
                     "-c:v".into(),
                     "libwebp".into(),
-                    "-q:v".into(),
+                    "-quality".into(),
                     quality.to_string(),
                 ]);
             }

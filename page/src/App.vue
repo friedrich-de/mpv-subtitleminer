@@ -1205,7 +1205,7 @@
                   </select>
                 </label>
                 <label class="form-group">
-                  <span>Image quality</span>
+                  <span>Image quality (WebP only)</span>
                   <input
                     v-model.number="localMediaSettings.image.quality"
                     type="number"
