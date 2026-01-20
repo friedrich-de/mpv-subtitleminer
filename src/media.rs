@@ -8,6 +8,9 @@ use uuid::Uuid;
 use crate::event_loop::Subtitle;
 
 const AUDIO_PADDING: f64 = 0.25;
+const ANIMATED_IMAGE_FPS: u32 = 20;
+const ANIMATED_IMAGE_MAX_WIDTH: u32 = 800;
+const ANIMATED_IMAGE_QUALITY: u8 = 30;
 
 static FFMPEG_PATH: OnceLock<String> = OnceLock::new();
 
@@ -69,6 +72,8 @@ pub enum ImageFormat {
     Jpeg,
     Webp,
     Avif,
+    AnimatedWebp,
+    AnimatedAvif,
 }
 
 impl ImageFormat {
@@ -77,6 +82,8 @@ impl ImageFormat {
             "jpg" | "jpeg" => Some(Self::Jpeg),
             "webp" => Some(Self::Webp),
             "avif" => Some(Self::Avif),
+            "webp_animated" => Some(Self::AnimatedWebp),
+            "avif_animated" => Some(Self::AnimatedAvif),
             _ => None,
         }
     }
@@ -86,6 +93,8 @@ impl ImageFormat {
             Self::Jpeg => "jpg",
             Self::Webp => "webp",
             Self::Avif => "avif",
+            Self::AnimatedWebp => "webp",
+            Self::AnimatedAvif => "avif",
         }
     }
 
@@ -94,6 +103,8 @@ impl ImageFormat {
             Self::Jpeg => "image/jpeg",
             Self::Webp => "image/webp",
             Self::Avif => "image/avif",
+            Self::AnimatedWebp => "image/webp",
+            Self::AnimatedAvif => "image/avif",
         }
     }
 }
@@ -184,45 +195,93 @@ impl FfmpegRequest {
             mid_time, sub.media_path
         );
 
-        let mut args = vec![
-            "-ss".into(),
-            format!("{:.3}", mid_time),
-            "-i".into(),
-            sub.media_path.clone(),
-            "-vframes".into(),
-            "1".into(),
-            "-vf".into(),
-            "scale=640:-2".into(),
-        ];
+        let mut args = vec!["-i".into(), sub.media_path.clone()];
 
         match options.format {
-            ImageFormat::Jpeg => {
-                args.extend(["-q:v".into(), "5".into()]);
-            }
-            ImageFormat::Webp => {
-                let quality = options.quality.unwrap_or(80);
+            ImageFormat::AnimatedWebp | ImageFormat::AnimatedAvif => {
+                let start = sub.sub_start.max(0.0);
+                let duration = (sub.sub_end - sub.sub_start).max(0.1);
+                let filter = format!(
+                    "fps={},scale=min({}\\,iw):-2",
+                    ANIMATED_IMAGE_FPS, ANIMATED_IMAGE_MAX_WIDTH
+                );
                 args.extend([
-                    "-c:v".into(),
-                    "libwebp".into(),
-                    "-quality".into(),
-                    quality.to_string(),
+                    "-ss".into(),
+                    format!("{:.3}", start),
+                    "-t".into(),
+                    format!("{:.3}", duration),
+                    "-vf".into(),
+                    filter,
+                    "-an".into(),
                 ]);
+                match options.format {
+                    ImageFormat::AnimatedWebp => {
+                        args.extend([
+                            "-c:v".into(),
+                            "libwebp".into(),
+                            "-quality".into(),
+                            ANIMATED_IMAGE_QUALITY.to_string(),
+                            "-loop".into(),
+                            "0".into(),
+                        ]);
+                    }
+                    ImageFormat::AnimatedAvif => {
+                        args.extend([
+                            "-c:v".into(),
+                            "libaom-av1".into(),
+                            "-crf".into(),
+                            ANIMATED_IMAGE_QUALITY.to_string(),
+                            "-b:v".into(),
+                            "0".into(),
+                            "-pix_fmt".into(),
+                            "yuv420p".into(),
+                            "-f".into(),
+                            "avif".into(),
+                        ]);
+                    }
+                    _ => {}
+                }
             }
-            ImageFormat::Avif => {
-                args.extend([
-                    "-c:v".into(),
-                    "libaom-av1".into(),
-                    "-still-picture".into(),
-                    "1".into(),
-                    "-crf".into(),
-                    "35".into(),
-                    "-b:v".into(),
-                    "0".into(),
-                    "-pix_fmt".into(),
-                    "yuv420p".into(),
-                    "-f".into(),
-                    "avif".into(),
-                ]);
+            _ => {
+                args.splice(
+                    0..0,
+                    [
+                        "-ss".into(),
+                        format!("{:.3}", mid_time),
+                    ],
+                );
+                args.extend(["-vframes".into(), "1".into(), "-vf".into(), "scale=640:-2".into()]);
+                match options.format {
+                    ImageFormat::Jpeg => {
+                        args.extend(["-q:v".into(), "5".into()]);
+                    }
+                    ImageFormat::Webp => {
+                        let quality = options.quality.unwrap_or(80);
+                        args.extend([
+                            "-c:v".into(),
+                            "libwebp".into(),
+                            "-quality".into(),
+                            quality.to_string(),
+                        ]);
+                    }
+                    ImageFormat::Avif => {
+                        args.extend([
+                            "-c:v".into(),
+                            "libaom-av1".into(),
+                            "-still-picture".into(),
+                            "1".into(),
+                            "-crf".into(),
+                            "35".into(),
+                            "-b:v".into(),
+                            "0".into(),
+                            "-pix_fmt".into(),
+                            "yuv420p".into(),
+                            "-f".into(),
+                            "avif".into(),
+                        ]);
+                    }
+                    _ => {}
+                }
             }
         }
 

@@ -22,7 +22,7 @@
     ports: number[]
   }
 
-  type ImageFormat = 'jpg' | 'webp' | 'avif'
+  type ImageFormat = 'jpg' | 'webp' | 'webp_animated' | 'avif' | 'avif_animated'
   type AudioFormat = 'mp3' | 'opus'
 
   interface MediaSettings {
@@ -382,7 +382,7 @@
       return {
         id,
         data,
-        ext: ext ?? format,
+        ext: ext ?? imageFormatToExt(format),
         mime: mime ?? imageMimeMap[format],
       }
     }
@@ -415,7 +415,19 @@
   const imageMimeMap: Record<ImageFormat, string> = {
     jpg: 'image/jpeg',
     webp: 'image/webp',
+    webp_animated: 'image/webp',
     avif: 'image/avif',
+    avif_animated: 'image/avif',
+  }
+  const imageFormatToExt = (format: ImageFormat): string => {
+    switch (format) {
+      case 'webp_animated':
+        return 'webp'
+      case 'avif_animated':
+        return 'avif'
+      default:
+        return format
+    }
   }
   const audioMimeMap: Record<AudioFormat, string> = {
     mp3: 'audio/mpeg',
@@ -430,7 +442,7 @@
       const format = settings.value.media.image.format
       return {
         data: msg.thumbnail,
-        ext: msg.thumbnailExt ?? format,
+        ext: msg.thumbnailExt ?? imageFormatToExt(format),
         mime: msg.thumbnailMime ?? imageMimeMap[format],
       }
     }
@@ -1201,18 +1213,23 @@
                   <select v-model="localMediaSettings.image.format">
                     <option value="jpg">JPEG</option>
                     <option value="webp">WebP</option>
+                    <option value="webp_animated">WebP (animated)</option>
                     <option value="avif">AVIF</option>
+                    <option value="avif_animated">AVIF (animated)</option>
                   </select>
+                  <small class="field-hint">
+                    Animated formats use 20fps, max 800px width, quality 30.
+                  </small>
                 </label>
                 <label class="form-group">
-                  <span>Image quality (WebP only)</span>
+                  <span>Image quality (WebP)</span>
                   <input
                     v-model.number="localMediaSettings.image.quality"
                     type="number"
                     min="0"
                     max="100"
                   />
-                  <small class="field-hint">0-100, applied when using WebP output.</small>
+                  <small class="field-hint">0-100, applied for WebP static thumbnails.</small>
                 </label>
                 <label class="form-group">
                   <span>Audio format</span>
