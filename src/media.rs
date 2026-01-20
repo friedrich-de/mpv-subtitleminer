@@ -195,25 +195,25 @@ impl FfmpegRequest {
             mid_time, sub.media_path
         );
 
-        let mut args = vec!["-i".into(), sub.media_path.clone()];
-
         match options.format {
             ImageFormat::AnimatedWebp | ImageFormat::AnimatedAvif => {
                 let start = sub.sub_start.max(0.0);
                 let duration = (sub.sub_end - sub.sub_start).max(0.1);
                 let filter = format!(
-                    "fps={},scale=min({}\\,iw):-2",
+                    "fps={},scale=min({},iw):-2",
                     ANIMATED_IMAGE_FPS, ANIMATED_IMAGE_MAX_WIDTH
                 );
-                args.extend([
+                let mut args = vec![
                     "-ss".into(),
                     format!("{:.3}", start),
+                    "-i".into(),
+                    sub.media_path.clone(),
                     "-t".into(),
                     format!("{:.3}", duration),
                     "-vf".into(),
                     filter,
                     "-an".into(),
-                ]);
+                ];
                 match options.format {
                     ImageFormat::AnimatedWebp => {
                         args.extend([
@@ -241,16 +241,25 @@ impl FfmpegRequest {
                     }
                     _ => {}
                 }
+                args.extend(["-y".into(), output.display().to_string()]);
+                return Self {
+                    args,
+                    output_path: output,
+                    ext: options.format.ext().to_string(),
+                    mime: options.format.mime().to_string(),
+                };
             }
             _ => {
-                args.splice(
-                    0..0,
-                    [
-                        "-ss".into(),
-                        format!("{:.3}", mid_time),
-                    ],
-                );
-                args.extend(["-vframes".into(), "1".into(), "-vf".into(), "scale=640:-2".into()]);
+                let mut args = vec![
+                    "-ss".into(),
+                    format!("{:.3}", mid_time),
+                    "-i".into(),
+                    sub.media_path.clone(),
+                    "-vframes".into(),
+                    "1".into(),
+                    "-vf".into(),
+                    "scale=640:-2".into(),
+                ];
                 match options.format {
                     ImageFormat::Jpeg => {
                         args.extend(["-q:v".into(), "5".into()]);
@@ -282,16 +291,14 @@ impl FfmpegRequest {
                     }
                     _ => {}
                 }
+                args.extend(["-y".into(), output.display().to_string()]);
+                return Self {
+                    args,
+                    output_path: output,
+                    ext: options.format.ext().to_string(),
+                    mime: options.format.mime().to_string(),
+                };
             }
-        }
-
-        args.extend(["-y".into(), output.display().to_string()]);
-
-        Self {
-            args,
-            output_path: output,
-            ext: options.format.ext().to_string(),
-            mime: options.format.mime().to_string(),
         }
     }
 
