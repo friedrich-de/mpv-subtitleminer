@@ -15,6 +15,7 @@
     sentenceField: string
     audioField: string
     imageField: string
+    maxCardAgeMinutes: number
   }
 
   interface ConnectionSettings {
@@ -29,7 +30,7 @@
 
   const STORAGE_KEY = 'mpv_subtitle_tool_settings'
   const defaultSettings: Settings = {
-    anki: { noteType: '', frontField: '', sentenceField: '', audioField: '', imageField: '' },
+    anki: { noteType: '', frontField: '', sentenceField: '', audioField: '', imageField: '', maxCardAgeMinutes: 5 },
     connection: { host: '127.0.0.1', ports: [...DEFAULT_PORTS] },
   }
 
@@ -136,10 +137,12 @@
       sentenceField: '',
       audioField: '',
       imageField: '',
+      maxCardAgeMinutes: 5,
     }
   }
 
-  function onFieldChange(field: keyof AnkiSettings, value: string) {
+  function onFieldChange(field: keyof AnkiSettings, value: string | number) {
+    // @ts-ignore - dynamic assignment
     localSettings.value = { ...localSettings.value, [field]: value }
   }
 
@@ -555,6 +558,15 @@
       const targetNote = await anki.getLastNote(settings.value.anki.noteType)
       if (!targetNote) {
         throw new Error('No target card found in Anki')
+      }
+
+      const maxAgeMinutes = settings.value.anki.maxCardAgeMinutes ?? 5
+      if (maxAgeMinutes > 0) {
+        const thresholdMs = maxAgeMinutes * 60000
+
+        if (Date.now() - targetNote.noteId > thresholdMs) {
+          throw new Error(`Cannot add to card: The latest card is too old (> ${maxAgeMinutes} minutes).`)
+        }
       }
 
       const fieldUpdates: Record<string, string> = {}
@@ -1039,6 +1051,18 @@
                         {{ field }}
                       </option>
                     </select>
+                  </label>
+
+                  <label class="form-group">
+                    <span>Max card age (minutes)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      :value="localSettings.maxCardAgeMinutes"
+                      @input="(e) => onFieldChange('maxCardAgeMinutes', parseFloat((e.target as HTMLInputElement).value) || 0)"
+                    />
+                    <small class="field-hint">Prevent adding to cards older than this (0 for no limit).</small>
                   </label>
                 </template>
                 <div v-if="loadingModels" class="muted-box">Loading note types…</div>
