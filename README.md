@@ -1,13 +1,12 @@
 # mpv-subtitleminer
 
-This is a tool for mpv to enable language learning with subtitle files. We send subtitles to a web-front end where you can look up words, create Anki flashcards add the sentence and media to your card. We do this by launching a local Rust server from mpv that connects th web front end to mpv via its IPC interface.
+This is a tool for mpv to enable language learning with subtitle files. We send subtitles to a web-front end where you can look up words, create Anki flashcards add the sentence and media to your card. We do this by launching a local Rust server from mpv that connects the web front end to mpv via its IPC interface.
 
 **Warning**: This is an early release. Expect bugs and rough edges.
 
 ## Demo
 
 https://github.com/user-attachments/assets/47437d89-54f1-4039-bd17-d1fb8b453725
-
 
 ## Features
 
