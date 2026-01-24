@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::event_loop::Subtitle;
 
-const AUDIO_PADDING: f64 = 0.25;
+const DEFAULT_AUDIO_OFFSET: f64 = 0.25;
 
 static FFMPEG_PATH: OnceLock<String> = OnceLock::new();
 
@@ -98,14 +98,30 @@ impl FfmpegRequest {
         }
     }
 
-    pub fn audio(sub: &Subtitle) -> Self {
-        Self::audio_range(sub.sub_start, sub.sub_end, &sub.media_path, sub.aid)
+    pub fn audio(sub: &Subtitle, offset_start: Option<f64>, offset_end: Option<f64>) -> Self {
+        Self::audio_range(
+            sub.sub_start,
+            sub.sub_end,
+            &sub.media_path,
+            sub.aid,
+            offset_start,
+            offset_end,
+        )
     }
 
-    pub fn audio_range(sub_start: f64, sub_end: f64, media_path: &str, aid: i64) -> Self {
-        let output = temp_path("audio", "mp3");
-        let start = (sub_start - AUDIO_PADDING).max(0.0);
-        let duration = sub_end - sub_start + AUDIO_PADDING * 2.0;
+    pub fn audio_range(
+        sub_start: f64,
+        sub_end: f64,
+        media_path: &str,
+        aid: i64,
+        offset_start: Option<f64>,
+        offset_end: Option<f64>,
+    ) -> Self {
+        let output = temp_path("audio", "opus");
+        let start_offset = offset_start.unwrap_or(DEFAULT_AUDIO_OFFSET);
+        let end_offset = offset_end.unwrap_or(DEFAULT_AUDIO_OFFSET);
+        let start = (sub_start - start_offset).max(0.0);
+        let duration = sub_end - sub_start + start_offset + end_offset;
 
         debug!(
             "[media] Audio {:.3}-{:.3} from {}",
@@ -139,7 +155,7 @@ impl FfmpegRequest {
     pub fn from_type(media_type: MediaType, sub: &Subtitle) -> Self {
         match media_type {
             MediaType::Thumbnail => Self::thumbnail(sub),
-            MediaType::Audio => Self::audio(sub),
+            MediaType::Audio => Self::audio(sub, None, None),
         }
     }
 

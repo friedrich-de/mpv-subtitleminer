@@ -340,11 +340,19 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
         let start_id = json.get("start_id")?.as_u64()?;
         let end_id = json.get("end_id")?.as_u64()?;
 
+        let offset_start = json.get("offset_start").and_then(|v| v.as_f64());
+        let offset_end = json.get("offset_end").and_then(|v| v.as_f64());
         let store = state.subtitles.read().await;
         let start = store.get(&start_id)?;
         let end = store.get(&end_id)?;
-        let request =
-            FfmpegRequest::audio_range(start.sub_start, end.sub_end, &start.media_path, start.aid);
+        let request = FfmpegRequest::audio_range(
+            start.sub_start,
+            end.sub_end,
+            &start.media_path,
+            start.aid,
+            offset_start,
+            offset_end,
+        );
         drop(store);
 
         info!(
@@ -374,7 +382,12 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
     let sub = store.get(&subtitle_id)?.clone();
     drop(store);
 
-    let request = FfmpegRequest::from_type(media_type, &sub);
+    let offset_start = json.get("offset_start").and_then(|v| v.as_f64());
+    let offset_end = json.get("offset_end").and_then(|v| v.as_f64());
+    let request = match media_type {
+        MediaType::Thumbnail => FfmpegRequest::thumbnail(&sub),
+        MediaType::Audio => FfmpegRequest::audio(&sub, offset_start, offset_end),
+    };
     info!(
         "[client:{}] Requesting {} for subtitle {}",
         client_id, request_type, subtitle_id

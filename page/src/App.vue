@@ -24,15 +24,22 @@
     ports: number[]
   }
 
+  interface MediaSettings {
+    audioOffsetStart: number
+    audioOffsetEnd: number
+  }
+
   interface Settings {
     anki: AnkiSettings
     connection: ConnectionSettings
+    media: MediaSettings
   }
 
   const STORAGE_KEY = 'mpv_subtitle_tool_settings'
   const defaultSettings: Settings = {
     anki: { noteType: '', frontField: '', sentenceField: '', audioField: '', imageField: '', maxCardAgeMinutes: 5 },
     connection: { host: '127.0.0.1', ports: [...DEFAULT_PORTS] },
+    media: { audioOffsetStart: 0.25, audioOffsetEnd: 0.25 },
   }
 
   function loadSettings(): Settings {
@@ -45,6 +52,7 @@
           ...parsed,
           anki: { ...defaultSettings.anki, ...parsed.anki },
           connection: { ...defaultSettings.connection, ...parsed.connection },
+          media: { ...defaultSettings.media, ...parsed.media },
         }
       }
     } catch (err) {
@@ -82,6 +90,7 @@
   const modelsError = ref<string | null>(null)
   const localSettings = ref<AnkiSettings>({ ...settings.value.anki })
   const localConnection = ref<ConnectionSettings>({ ...settings.value.connection })
+  const localMedia = ref<MediaSettings>({ ...settings.value.media })
   const localPortInput = ref('')
 
   const modelNames = computed(() => Object.keys(modelsWithFields.value).sort())
@@ -100,6 +109,7 @@
     if (isOpen) {
       localSettings.value = { ...settings.value.anki }
       localConnection.value = { ...settings.value.connection }
+      localMedia.value = { ...settings.value.media }
       localPortInput.value = localConnection.value.ports.join(', ')
       if (connectionStatus.value === 'untested') {
         void testConnection()
@@ -148,14 +158,30 @@
     }
   }
 
+  function onMediaChange(field: keyof MediaSettings, value: number) {
+    localMedia.value = { ...localMedia.value, [field]: value }
+  }
+
   function onFieldChange(field: keyof AnkiSettings, value: string | number) {
     // @ts-ignore - dynamic assignment
     localSettings.value = { ...localSettings.value, [field]: value }
   }
 
   function saveSettings() {
+    const audioSettingsChanged =
+      localMedia.value.audioOffsetStart !== settings.value.media.audioOffsetStart ||
+      localMedia.value.audioOffsetEnd !== settings.value.media.audioOffsetEnd
+
     settings.value.anki = { ...localSettings.value }
     settings.value.connection = { ...localConnection.value }
+    settings.value.media = { ...localMedia.value }
+    
+    if (audioSettingsChanged) {
+      for (const msg of messages.value) {
+        msg.audio = undefined
+      }
+    }
+
     showSettings.value = false
     toast.success('Settings saved')
   }
@@ -461,6 +487,11 @@
     { immediate: true },
   )
 
+  const getAudioParams = () => ({
+    offset_start: settings.value.media.audioOffsetStart,
+    offset_end: settings.value.media.audioOffsetEnd,
+  })
+
   const sendToPort = (payload: JsonValue, port: number | undefined): boolean => {
     if (!port) return false
     return ws.send(payload, port)
@@ -485,7 +516,12 @@
     }
     const key = `audio-${msg.uid}`
     if (loadingMedia.value[key]) return
-    if (!sendToPort({ request: 'audio', id: msg.id }, msg.sourcePort)) {
+    const payload: Record<string, JsonValue> = {
+      request: 'audio',
+      id: msg.id,
+      ...getAudioParams(),
+    }
+    if (!sendToPort(payload, msg.sourcePort)) {
       toast.error(`Not connected to port ${msg.sourcePort}`)
       return
     }
@@ -582,7 +618,7 @@
         let audioData =
           selectedMsgs.length > 1
             ? await requestAudioRange(first.id, last.id, first.sourcePort)
-            : first.audio || (await requestMediaFromServer(first, 'audio'))
+                : first.audio || (await requestMediaFromServer(first, 'audio'))
 
         if (audioData) {
           const filename = generateMediaFilename(primaryId, 'audio')
@@ -663,7 +699,12 @@
       }
 
       loadingMedia.value[key] = true
-      if (!sendToPort({ request: type, id: msg.id }, msg.sourcePort)) {
+      const payload: Record<string, JsonValue> = { request: type, id: msg.id }
+      if (type === 'audio') {
+        Object.assign(payload, getAudioParams())
+      }
+      
+      if (!sendToPort(payload, msg.sourcePort)) {
         delete loadingMedia.value[key]
         resolve(undefined)
         return
@@ -725,7 +766,17 @@
       }
 
       loadingMedia.value[key] = true
-      if (!sendToPort({ request: 'audio_range', start_id: startId, end_id: endId }, port)) {
+      if (
+        !sendToPort(
+          {
+            request: 'audio_range',
+            start_id: startId,
+            end_id: endId,
+            ...getAudioParams(),
+          },
+          port,
+        )
+      ) {
         delete loadingMedia.value[key]
         resolve(undefined)
         return
@@ -974,6 +1025,53 @@
 
             <section class="section">
               <div class="section-header">
+                <h3>Media configuration</h3>
+              </div>
+              <div class="form-grid">
+                <label class="form-group">
+                  <span>Start offset (seconds)</span>
+                  <div class="input-group">
+                    <input
+                      type="number"
+                      step="0.05"
+                      :value="localMedia.audioOffsetStart"
+                      @input="(e) => onMediaChange('audioOffsetStart', parseFloat((e.target as HTMLInputElement).value) || 0)"
+                    />
+                    <button 
+                      class="btn-reset" 
+                      :class="{ visible: localMedia.audioOffsetStart !== defaultSettings.media.audioOffsetStart }"
+                      :title="`Reset to default (${defaultSettings.media.audioOffsetStart}s)`"
+                      @click="onMediaChange('audioOffsetStart', defaultSettings.media.audioOffsetStart)"
+                    >
+                      ↺
+                    </button>
+                  </div>
+                </label>
+                <label class="form-group">
+                  <span>End offset (seconds)</span>
+                  <div class="input-group">
+                    <input
+                      type="number"
+                      step="0.05"
+                      :value="localMedia.audioOffsetEnd"
+                      @input="(e) => onMediaChange('audioOffsetEnd', parseFloat((e.target as HTMLInputElement).value) || 0)"
+                    />
+                    <button 
+                      class="btn-reset" 
+                      :class="{ visible: localMedia.audioOffsetEnd !== defaultSettings.media.audioOffsetEnd }"
+                      :title="`Reset to default (${defaultSettings.media.audioOffsetEnd}s)`"
+                      @click="onMediaChange('audioOffsetEnd', defaultSettings.media.audioOffsetEnd)"
+                    >
+                      ↺
+                    </button>
+                  </div>
+                </label>
+              </div>
+              <small class="field-hint full-width">Positive extends audio, negative trims it.</small>
+            </section>
+
+            <section class="section">
+              <div class="section-header">
                 <h3>Card configuration</h3>
                 <span v-if="connectionStatus !== 'connected'" class="subtle"
                   >Connect first to load models</span
@@ -1212,6 +1310,53 @@
     padding: 6px 8px;
     border-radius: 6px;
     min-width: 120px;
+  }
+
+  .input-group {
+    display: flex;
+    align-items: center;
+    position: relative;
+  }
+
+  .input-group input {
+    width: 100%;
+    padding-right: 32px; /* Space for reset button */
+    -moz-appearance: textfield;
+  }
+
+  .input-group input::-webkit-outer-spin-button,
+  .input-group input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .btn-reset {
+    position: absolute;
+    right: 4px;
+    background: none;
+    border: none;
+    color: #6c7687;
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, background 0.15s ease;
+  }
+
+  .btn-reset.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .btn-reset:hover {
+    color: #e9edf2;
+    background: #2a313c;
   }
 
   .btn {
@@ -1724,5 +1869,10 @@
     .toast {
       width: 100%;
     }
+  }
+  .field-hint.full-width {
+    display: block;
+    margin-top: 0.5rem;
+    text-align: left;
   }
 </style>

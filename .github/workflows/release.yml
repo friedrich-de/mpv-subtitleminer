@@ -89,7 +89,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/mpv/
           cp page/dist/index.html dist/mpv/
           cp mpv/mpv.conf dist/mpv/
-          cp mpv/run_server.lua dist/mpv/scripts/
+          cp mpv/mpv-subtitleminer.lua dist/mpv/scripts/
           cd dist && zip -r "../${{ matrix.artifact }}.zip" mpv
 
       - name: Package (macOS)
@@ -100,7 +100,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/mpv/
           cp page/dist/index.html dist/mpv/
           cp mpv/mpv.conf dist/mpv/
-          cp mpv/run_server.lua dist/mpv/scripts/
+          cp mpv/mpv-subtitleminer.lua dist/mpv/scripts/
           cd dist && zip -r "../${{ matrix.artifact }}.zip" mpv
 
       - name: Download ffmpeg.exe (Windows)
@@ -141,7 +141,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" dist/mpv/
           Copy-Item page/dist/index.html dist/mpv/
           Copy-Item mpv/mpv.conf dist/mpv/
-          Copy-Item mpv/run_server.lua dist/mpv/scripts/
+          Copy-Item mpv/mpv-subtitleminer.lua dist/mpv/scripts/
           Compress-Archive -Path dist/mpv -DestinationPath "${{ matrix.artifact }}.zip"
 
       - name: Upload artifact
