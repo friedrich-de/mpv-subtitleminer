@@ -98,6 +98,15 @@ end
 local ffmpeg_path = find_ffmpeg()
 local ffmpeg_has_https = check_ffmpeg_https(ffmpeg_path)
 
+local function strip_mpv_conf_value(v)
+  if not v then
+    return v
+  end
+  -- Strip leading %<digits>% if present.
+  v = v:gsub("^%%(%d+)%%", "")
+  return v
+end
+
 -- Find the IPC socket path from mpv.conf
 local function find_mpv_socket()
   local file = io.open(config_file_path, "r")
@@ -111,8 +120,8 @@ local function find_mpv_socket()
   for line in file:lines() do
     socket_path = line:match("^input%-ipc%-server%s*=%s*(.+)$")
     if socket_path then
-      -- Trim trailing whitespace
-      socket_path = socket_path:gsub("%s+$", "")
+      -- Trim trailing whitespace and strip prefix
+      socket_path = strip_mpv_conf_value(socket_path:gsub("%s+$", ""))
       break
     end
   end
