@@ -21,15 +21,15 @@ if type(opts.ports) == "string" then
     if port and port > 0 and port <= 65535 then
       table.insert(ports_table, port)
     else
-      mp.msg.warn("[mpv-subtitleminer] Invalid port value: " .. port_str)
+      mp.msg.warn("Invalid port value: " .. port_str)
     end
   end
   opts.ports = ports_table
 end
 
 if #opts.ports == 0 then
-  mp.msg.error("[mpv-subtitleminer] No valid ports configured")
-  mp.osd_message("No valid ports configured", 5)
+  mp.msg.error("No valid ports configured")
+  mp.osd_message("[mpv-subtitleminer] No valid ports configured", 5)
   return
 end
 
@@ -37,8 +37,8 @@ local platform = mp.get_property_native("platform")
 
 local config_file_path = mp.find_config_file("mpv.conf")
 if not config_file_path then
-  mp.osd_message("Could not find mpv.conf", 5)
-  mp.msg.error("[mpv-subtitleminer] Could not find mpv.conf")
+  mp.osd_message("[mpv-subtitleminer] Could not find mpv.conf", 5)
+  mp.msg.error("Could not find mpv.conf")
   return
 end
 
@@ -49,11 +49,11 @@ local binary_path = utils.join_path(config_folder_path, binary_name)
 -- Verify binary exists
 local info, err = utils.file_info(binary_path)
 if err then
-  mp.osd_message("mpv-subtitleminer binary not found at " .. binary_path, 5)
-  mp.msg.error("[mpv-subtitleminer] mpv-subtitleminer binary not found at: " .. binary_path)
+  mp.osd_message("[mpv-subtitleminer] mpv-subtitleminer binary not found at " .. binary_path, 5)
+  mp.msg.error("mpv-subtitleminer binary not found at: " .. binary_path)
   return
 else
-  mp.msg.info("[mpv-subtitleminer] mpv-subtitleminer binary found at: " .. binary_path)
+  mp.msg.info("mpv-subtitleminer binary found at: " .. binary_path)
 end
 
 -- Find ffmpeg binary (next to mpv-subtitleminer first, then PATH)
@@ -64,12 +64,12 @@ local function find_ffmpeg()
   local local_ffmpeg = utils.join_path(config_folder_path, ffmpeg_name)
   local local_info, local_err = utils.file_info(local_ffmpeg)
   if not local_err then
-    mp.msg.info("[mpv-subtitleminer] Found ffmpeg next to binary: " .. local_ffmpeg)
+    mp.msg.info("Found ffmpeg next to binary: " .. local_ffmpeg)
     return local_ffmpeg
   end
 
   -- 2. Fall back to PATH
-  mp.msg.info("[mpv-subtitleminer] Using ffmpeg from PATH")
+  mp.msg.info("Using ffmpeg from PATH")
   return ffmpeg_name
 end
 
@@ -85,13 +85,13 @@ local function check_ffmpeg_https(ffmpeg_path)
 
   if result and result.stdout then
     if result.stdout:find("https") then
-      mp.msg.info("[mpv-subtitleminer] ffmpeg has HTTPS protocol support")
+      mp.msg.info("ffmpeg has HTTPS protocol support")
       return true
     end
   end
 
-  mp.msg.warn("[mpv-subtitleminer] ffmpeg does NOT have HTTPS support - network streams will not work!")
-  mp.msg.warn("[mpv-subtitleminer] To enable network support, use an ffmpeg build with openssl/gnutls enabled")
+  mp.msg.warn("ffmpeg does NOT have HTTPS support - network streams will not work!")
+  mp.msg.warn("To enable network support, use an ffmpeg build with openssl/gnutls enabled")
   return false
 end
 
@@ -112,7 +112,7 @@ local function find_mpv_socket()
   local file = io.open(config_file_path, "r")
   if not file then
     mp.osd_message("Failed to read mpv.conf.", 5)
-    mp.msg.error("[mpv-subtitleminer] Failed to read mpv.conf")
+    mp.msg.error("Failed to read mpv.conf")
     return nil
   end
 
@@ -128,8 +128,8 @@ local function find_mpv_socket()
   file:close()
 
   if not socket_path then
-    mp.msg.error("[mpv-subtitleminer] input-ipc-server not configured in mpv.conf")
-    mp.osd_message("input-ipc-server not configured in mpv.conf", 5)
+    mp.msg.error("input-ipc-server not configured in mpv.conf")
+    mp.osd_message("[mpv-subtitleminer] input-ipc-server not configured in mpv.conf", 5)
     return nil
   end
 
@@ -146,11 +146,11 @@ end
 
 local mpv_socket = find_mpv_socket()
 if not mpv_socket then
-  mp.msg.error("[mpv-subtitleminer] Could not determine mpv IPC socket path")
-  mp.osd_message("Could not determine mpv IPC socket path", 5)
+  mp.msg.error("Could not determine mpv IPC socket path")
+  mp.osd_message("[mpv-subtitleminer] Could not determine mpv IPC socket path", 5)
   return
 else
-  mp.msg.info("[mpv-subtitleminer] Using mpv IPC socket at: " .. mpv_socket)
+  mp.msg.info("Using mpv IPC socket at: " .. mpv_socket)
 end
 
 local server_process = nil
@@ -168,13 +168,13 @@ end
 
 local function try_start_on_port(port_index)
   if port_index > #opts.ports then
-    mp.msg.error("[mpv-subtitleminer] Failed to start server on any port")
-    mp.osd_message("Failed to start server on any port", 5)
+    mp.msg.error("Failed to start server on any port")
+    mp.osd_message("[mpv-subtitleminer] Failed to start server on any port", 5)
     return
   end
 
   local port = opts.ports[port_index]
-  mp.msg.info("[mpv-subtitleminer] Trying to start server on port " .. port .. "...")
+  mp.msg.info("Trying to start server on port " .. port .. "...")
   current_port = port
 
   local args = { binary_path, mpv_socket, tostring(port), ffmpeg_path }
@@ -183,7 +183,7 @@ local function try_start_on_port(port_index)
     table.insert(args, "--expected-mpv-pid")
     table.insert(args, tostring(mpv_pid))
   else
-    mp.msg.warn("[mpv-subtitleminer] Could not determine mpv PID; instance validation disabled")
+    mp.msg.warn("Could not determine mpv PID; instance validation disabled")
   end
 
   server_process = mp.command_native_async({
@@ -210,18 +210,18 @@ local function try_start_on_port(port_index)
     if result then
       if result.stdout and result.stdout ~= "" then
         for line in result.stdout:gmatch("[^\r\n]+") do
-          mp.msg.info("[mpv-subtitleminer] " .. line)
+          mp.msg.info("" .. line)
         end
       end
       if result.stderr and result.stderr ~= "" then
         for line in result.stderr:gmatch("[^\r\n]+") do
-          mp.msg.warn("[mpv-subtitleminer] " .. line)
+          mp.msg.warn("" .. line)
         end
       end
     end
 
     if stderr_text:find("MPV_IPC_PID_MISMATCH") then
-      mp.msg.error("[mpv-subtitleminer] mpv IPC socket belongs to a different mpv instance (shared input-ipc-server)")
+      mp.msg.error("mpv IPC socket belongs to a different mpv instance (shared input-ipc-server)")
       mp.osd_message(
         "[mpv-subtitleminer]: IPC socket is in use by another mpv instance\nSet a unique input-ipc-server per instance",
         6)
@@ -230,14 +230,14 @@ local function try_start_on_port(port_index)
     end
 
     if stderr_text:find("Failed to connect to mpv socket") or stderr_text:find("Failed to connect to mpv pipe") then
-      mp.msg.error("[mpv-subtitleminer] Could not connect to mpv IPC socket at: " .. mpv_socket)
+      mp.msg.error("Could not connect to mpv IPC socket at: " .. mpv_socket)
       mp.osd_message("[mpv-subtitleminer]: can't connect to mpv IPC socket\n" .. mpv_socket, 6)
       current_port = nil
       return
     end
 
     if is_port_error then
-      mp.msg.info("[mpv-subtitleminer] Port " .. port .. " in use, trying next...")
+      mp.msg.info("Port " .. port .. " in use, trying next...")
       try_start_on_port(port_index + 1)
       return
     end
@@ -245,11 +245,11 @@ local function try_start_on_port(port_index)
     if was_confirmed_running then
       if not success then
         local error_msg = error or "unknown error"
-        mp.msg.error("[mpv-subtitleminer] Server exited with error: " .. error_msg)
+        mp.msg.error("Server exited with error: " .. error_msg)
         mp.osd_message("[mpv-subtitleminer] server stopped (error)", 3)
       else
         local status = result and result.status or "unknown"
-        mp.msg.info("[mpv-subtitleminer] Server exited with status: " .. tostring(status))
+        mp.msg.info("Server exited with status: " .. tostring(status))
         mp.osd_message("[mpv-subtitleminer] server stopped", 2)
       end
     end
@@ -264,36 +264,36 @@ local function try_start_on_port(port_index)
       startup_timer = nil
       if server_process then
         server_running = true
-        mp.msg.info("[mpv-subtitleminer] Server confirmed running on port " .. port)
+        mp.msg.info("Server confirmed running on port " .. port)
         mp.osd_message("[mpv-subtitleminer] server started on port " .. port, 3)
       end
     end)
   else
-    mp.msg.error("[mpv-subtitleminer] Failed to start server process")
-    mp.osd_message("Failed to start server", 3)
+    mp.msg.error("Failed to start server process")
+    mp.osd_message("[mpv-subtitleminer] Failed to start server", 3)
   end
 end
 
 local function start_server()
   if server_running or server_process then
-    mp.osd_message("Server already running on port " .. (current_port or "unknown"), 2)
+    mp.osd_message("[mpv-subtitleminer] Server already running on port " .. (current_port or "unknown"), 2)
     return
   end
 
-  mp.msg.info("[mpv-subtitleminer] Starting mpv-subtitleminer server...")
-  mp.osd_message("Starting [mpv-subtitleminer] server...", 2)
+  mp.msg.info("Starting mpv-subtitleminer server...")
+  mp.osd_message("[mpv-subtitleminer] Starting server...", 2)
 
   try_start_on_port(1)
 end
 
 local function stop_server()
   if not server_process then
-    mp.osd_message("Server not running", 2)
+    mp.osd_message("[mpv-subtitleminer] Server not running", 2)
     return
   end
 
-  mp.msg.info("[mpv-subtitleminer] Stopping mpv-subtitleminer server...")
-  mp.osd_message("Stopping [mpv-subtitleminer] server...", 2)
+  mp.msg.info("Stopping mpv-subtitleminer server...")
+  mp.osd_message("[mpv-subtitleminer] Stopping server...", 2)
 
   local proc = server_process
   server_process = nil
@@ -324,7 +324,7 @@ mp.register_event("shutdown", function()
     startup_timer = nil
   end
   if server_running and server_process then
-    mp.msg.info("[mpv-subtitleminer] Shutting down server on mpv exit...")
+    mp.msg.info("Shutting down server on mpv exit...")
     mp.abort_async_command(server_process)
   end
 end)
