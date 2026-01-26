@@ -1,5 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -7,7 +8,7 @@ use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use crate::media::{FfmpegRequest, MediaType};
+use crate::media::FfmpegRequest;
 use crate::mpv_stream::MpvStream;
 
 #[derive(Clone)]
@@ -135,7 +136,10 @@ async fn get_mpv_pid(mpv: &mut MpvStream) -> std::io::Result<u32> {
 
     let pid = json
         .get("data")
-        .and_then(|d| d.as_u64().or_else(|| d.as_i64().and_then(|n| u64::try_from(n).ok())))
+        .and_then(|d| {
+            d.as_u64()
+                .or_else(|| d.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -143,9 +147,8 @@ async fn get_mpv_pid(mpv: &mut MpvStream) -> std::io::Result<u32> {
             )
         })?;
 
-    u32::try_from(pid).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "mpv PID out of range")
-    })
+    u32::try_from(pid)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "mpv PID out of range"))
 }
 
 pub async fn run_server(
@@ -331,88 +334,135 @@ async fn handle_client(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "request", rename_all = "snake_case")]
+enum ProtocolRequest {
+    Thumbnail {
+        id: u64,
+        end_id: Option<u64>,
+        image_config: Option<crate::media::ImageConfig>,
+    },
+    Audio {
+        id: u64,
+        offset_start: Option<f64>,
+        offset_end: Option<f64>,
+        audio_config: Option<crate::media::AudioConfig>,
+    },
+    AudioRange {
+        start_id: u64,
+        end_id: u64,
+        offset_start: Option<f64>,
+        offset_end: Option<f64>,
+        audio_config: Option<crate::media::AudioConfig>,
+    },
+}
+
 async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(text).ok()?;
-    let request_type = json.get("request")?.as_str()?;
+    let request: ProtocolRequest = serde_json::from_str(text).ok()?;
 
-    // Handle audio_range requests (multi-subtitle audio)
-    if request_type == "audio_range" {
-        let start_id = json.get("start_id")?.as_u64()?;
-        let end_id = json.get("end_id")?.as_u64()?;
-
-        let offset_start = json.get("offset_start").and_then(|v| v.as_f64());
-        let offset_end = json.get("offset_end").and_then(|v| v.as_f64());
-        let store = state.subtitles.read().await;
-        let start = store.get(&start_id)?;
-        let end = store.get(&end_id)?;
-        let request = FfmpegRequest::audio_range(
-            start.sub_start,
-            end.sub_end,
-            &start.media_path,
-            start.aid,
+    match request {
+        ProtocolRequest::AudioRange {
+            start_id,
+            end_id,
             offset_start,
             offset_end,
-        );
-        drop(store);
+            audio_config,
+        } => {
+            let store = state.subtitles.read().await;
+            let start = store.get(&start_id)?;
+            let end = store.get(&end_id)?;
+            let ffmpeg_req = FfmpegRequest::audio_range(
+                start.sub_start,
+                end.sub_end,
+                &start.media_path,
+                start.aid,
+                offset_start,
+                offset_end,
+                audio_config,
+            );
+            drop(store);
 
-        info!(
-            "[client:{}] Requesting audio_range from subtitle {} to {}",
-            client_id, start_id, end_id
-        );
+            info!(
+                "[client:{}] Requesting audio_range from subtitle {} to {}",
+                client_id, start_id, end_id
+            );
 
-        let data = tokio::task::spawn_blocking(move || request.execute())
-            .await
-            .ok()?;
+            let data = tokio::task::spawn_blocking(move || ffmpeg_req.execute())
+                .await
+                .ok()?;
 
-        return Some(
-            serde_json::json!({
-                "type": "audio_range",
-                "start_id": start_id,
-                "end_id": end_id,
-                "data": data,
-            })
-            .to_string(),
-        );
+            Some(
+                serde_json::json!({
+                    "type": "audio_range",
+                    "start_id": start_id,
+                    "end_id": end_id,
+                    "data": data,
+                })
+                .to_string(),
+            )
+        }
+        _ => {
+            let (subtitle_id, media_type, ffmpeg_req) = match request {
+                ProtocolRequest::Thumbnail { id, end_id, image_config } => {
+                    let store = state.subtitles.read().await;
+                    let mut sub = store.get(&id)?.clone();
+                    if let Some(eid) = end_id {
+                        if let Some(end_sub) = store.get(&eid) {
+                            sub.sub_end = end_sub.sub_end;
+                        }
+                    }
+                    drop(store);
+                    (
+                        id,
+                        "thumbnail",
+                        FfmpegRequest::thumbnail(&sub, image_config),
+                    )
+                }
+                ProtocolRequest::Audio {
+                    id,
+                    offset_start,
+                    offset_end,
+                    audio_config,
+                } => {
+                    let store = state.subtitles.read().await;
+                    let sub = store.get(&id)?.clone();
+                    drop(store);
+                    (
+                        id,
+                        "audio",
+                        FfmpegRequest::audio(&sub, offset_start, offset_end, audio_config),
+                    )
+                }
+                _ => unreachable!(),
+            };
+
+            info!(
+                "[client:{}] Requesting {} for subtitle {}",
+                client_id, media_type, subtitle_id
+            );
+
+            let req_type = media_type.to_string();
+            let data = tokio::task::spawn_blocking(move || ffmpeg_req.execute())
+                .await
+                .ok()?;
+
+            if data.is_some() {
+                debug!("[media] {} ready for subtitle {}", req_type, subtitle_id);
+            } else {
+                warn!(
+                    "[media] Failed to generate {} for subtitle {}",
+                    req_type, subtitle_id
+                );
+            }
+
+            Some(
+                serde_json::json!({
+                    "type": req_type,
+                    "id": subtitle_id,
+                    "data": data,
+                })
+                .to_string(),
+            )
+        }
     }
-
-    // Handle single-subtitle requests (thumbnail, audio)
-    let subtitle_id = json.get("id")?.as_u64()?;
-    let media_type = MediaType::from_str(request_type)?;
-    let store = state.subtitles.read().await;
-    let sub = store.get(&subtitle_id)?.clone();
-    drop(store);
-
-    let offset_start = json.get("offset_start").and_then(|v| v.as_f64());
-    let offset_end = json.get("offset_end").and_then(|v| v.as_f64());
-    let request = match media_type {
-        MediaType::Thumbnail => FfmpegRequest::thumbnail(&sub),
-        MediaType::Audio => FfmpegRequest::audio(&sub, offset_start, offset_end),
-    };
-    info!(
-        "[client:{}] Requesting {} for subtitle {}",
-        client_id, request_type, subtitle_id
-    );
-
-    let req_type = request_type.to_string();
-    let data = tokio::task::spawn_blocking(move || request.execute())
-        .await
-        .ok()?;
-
-    if data.is_some() {
-        debug!("[media] {} ready for subtitle {}", req_type, subtitle_id);
-    } else {
-        warn!(
-            "[media] Failed to generate {} for subtitle {}",
-            req_type, subtitle_id
-        );
-    }
-
-    Some(
-        serde_json::json!({
-            "type": req_type,
-            "id": subtitle_id,
-            "data": data,
-        })
-        .to_string(),
-    )
 }

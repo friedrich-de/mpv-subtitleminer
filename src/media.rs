@@ -1,5 +1,6 @@
 use base64::Engine;
-use log::{debug, warn};
+use log::{debug, info, warn};
+use serde::Deserialize;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::{env, fs, path::PathBuf};
@@ -32,8 +33,11 @@ fn resolve_ffmpeg_path(path: &str) -> String {
     #[cfg(target_os = "macos")]
     {
         if trimmed == "ffmpeg" {
-            for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
-            {
+            for candidate in [
+                "/opt/homebrew/bin/ffmpeg",
+                "/usr/local/bin/ffmpeg",
+                "/usr/bin/ffmpeg",
+            ] {
                 if fs::metadata(candidate).is_ok() {
                     return candidate.to_string();
                 }
@@ -48,57 +52,213 @@ fn temp_path(prefix: &str, ext: &str) -> PathBuf {
     env::temp_dir().join(format!("{}_{}.{}", prefix, Uuid::new_v4(), ext))
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum MediaType {
-    Thumbnail,
-    Audio,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ImageConfig {
+    pub format: String,
+    pub quality: i32,
+    pub is_animated: bool,
+    pub size: Option<String>,
+    pub advanced_args: Option<String>,
 }
 
-impl MediaType {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "thumbnail" => Some(Self::Thumbnail),
-            "audio" => Some(Self::Audio),
-            _ => None,
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            format: "jpeg".to_string(),
+            quality: 5,
+            is_animated: false,
+            size: None,
+            advanced_args: None,
         }
     }
 }
 
+impl ImageConfig {
+    pub fn get_extension(&self) -> &str {
+        let fmt = self.format.trim_start_matches('.');
+        if fmt.is_empty() {
+            return "jpg";
+        }
+        match fmt {
+            "jpeg" | "jpg" => "jpg",
+            "avif" | "avif_animated" => "avif",
+            "webp" | "webp_animated" => "webp",
+            other => other,
+        }
+    }
+
+    pub fn apply_to_args(&self, args: &mut Vec<String>, sub: &Subtitle) {
+        if let Some(advanced) = &self.advanced_args {
+            if self.is_animated {
+                args.extend(["-t".into(), format!("{:.3}", sub.sub_end - sub.sub_start)]);
+            } else {
+                args.extend(["-vframes".into(), "1".into()]);
+            }
+            args.extend(advanced.split_whitespace().map(|s| s.to_string()));
+            return;
+        }
+
+        if self.is_animated {
+            args.extend(["-t".into(), format!("{:.3}", sub.sub_end - sub.sub_start)]);
+        } else {
+            args.extend(["-vframes".into(), "1".into()]);
+        }
+
+        if let Some(size) = &self.size {
+            if !size.trim().is_empty() {
+                args.extend(["-vf".into(), format!("scale={}", size)]);
+            }
+        }
+
+        match self.format.as_str() {
+            "jpeg" | "jpg" => {
+                args.extend([
+                    "-c:v".into(),
+                    "mjpeg".into(),
+                    "-q:v".into(),
+                    format!("{}", self.quality.clamp(1, 31)),
+                ]);
+            }
+            "avif" => {
+                args.extend([
+                    "-c:v".into(),
+                    "libaom-av1".into(),
+                    "-crf".into(),
+                    format!("{}", self.quality.clamp(0, 63)),
+                    "-cpu-used".into(),
+                    "8".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                ]);
+                if !self.is_animated {
+                    args.extend(["-still-picture".into(), "1".into()]);
+                }
+            }
+            _ => {
+                args.extend([
+                    "-c:v".into(),
+                    "libwebp".into(),
+                    "-quality".into(),
+                    format!("{}", self.quality.clamp(0, 100)),
+                ]);
+                if self.is_animated {
+                    args.extend(["-loop".into(), "0".into()]);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub format: String,
+    pub quality: i32,
+    pub filters: Option<String>,
+    pub advanced_args: Option<String>,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            format: "mp3".to_string(),
+            quality: 128,
+            filters: None,
+            advanced_args: None,
+        }
+    }
+}
+
+impl AudioConfig {
+    pub fn get_extension(&self) -> &str {
+        let fmt = self.format.trim_start_matches('.');
+        if fmt.is_empty() {
+            return "mp3";
+        }
+        match fmt {
+            "mp3" => "mp3",
+            "opus" => "opus",
+            other => other,
+        }
+    }
+
+    pub fn apply_to_args(&self, args: &mut Vec<String>) {
+        if let Some(advanced) = &self.advanced_args {
+            args.extend(advanced.split_whitespace().map(|s| s.to_string()));
+            return;
+        }
+
+        if self.format == "mp3" {
+            args.extend([
+                "-c:a".into(),
+                "libmp3lame".into(),
+                "-b:a".into(),
+                format!("{}k", self.quality.clamp(8, 320)),
+            ]);
+        } else {
+            args.extend([
+                "-c:a".into(),
+                "libopus".into(),
+                "-b:a".into(),
+                format!("{}k", self.quality.clamp(8, 512)),
+            ]);
+        }
+
+        let mut filters = vec!["afade=t=in:d=0.005".to_string()];
+        if let Some(f) = &self.filters {
+            if !f.trim().is_empty() {
+                filters.push(f.clone());
+            }
+        }
+        args.extend(["-af".into(), filters.join(",")]);
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct FfmpegRequest {
     output_path: PathBuf,
     args: Vec<String>,
 }
 
 impl FfmpegRequest {
-    pub fn thumbnail(sub: &Subtitle) -> Self {
-        let output = temp_path("thumb", "jpg");
+    pub fn thumbnail(sub: &Subtitle, config: Option<ImageConfig>) -> Self {
+        let config = config.unwrap_or_default();
+        let is_animated = config.is_animated;
+
+        let ext = config.get_extension();
+        let output = temp_path("thumb", ext);
         let mid_time = (sub.sub_start + sub.sub_end) / 2.0;
 
         debug!(
-            "[media] Thumbnail at {:.3} from {}",
-            mid_time, sub.media_path
+            "[media] Thumbnail ({}) at {:.3} from {}",
+            config.format, mid_time, sub.media_path
         );
 
+        let ss = if is_animated { sub.sub_start } else { mid_time };
+
+        let mut args = vec![
+            "-ss".into(),
+            format!("{:.3}", ss),
+            "-i".into(),
+            sub.media_path.clone(),
+        ];
+
+        config.apply_to_args(&mut args, sub);
+
+        args.extend(["-y".into(), output.display().to_string()]);
         Self {
-            args: vec![
-                "-ss".into(),
-                format!("{:.3}", mid_time),
-                "-i".into(),
-                sub.media_path.clone(),
-                "-vframes".into(),
-                "1".into(),
-                "-vf".into(),
-                "scale=640:-2".into(),
-                "-q:v".into(),
-                "5".into(),
-                "-y".into(),
-                output.display().to_string(),
-            ],
+            args,
             output_path: output,
         }
     }
 
-    pub fn audio(sub: &Subtitle, offset_start: Option<f64>, offset_end: Option<f64>) -> Self {
+    pub fn audio(
+        sub: &Subtitle,
+        offset_start: Option<f64>,
+        offset_end: Option<f64>,
+        config: Option<AudioConfig>,
+    ) -> Self {
         Self::audio_range(
             sub.sub_start,
             sub.sub_end,
@@ -106,6 +266,7 @@ impl FfmpegRequest {
             sub.aid,
             offset_start,
             offset_end,
+            config,
         )
     }
 
@@ -116,51 +277,48 @@ impl FfmpegRequest {
         aid: i64,
         offset_start: Option<f64>,
         offset_end: Option<f64>,
+        config: Option<AudioConfig>,
     ) -> Self {
-        let output = temp_path("audio", "opus");
+        let config = config.unwrap_or_default();
+        let ext = config.get_extension();
+        let output = temp_path("audio", ext);
         let start_offset = offset_start.unwrap_or(DEFAULT_AUDIO_OFFSET);
         let end_offset = offset_end.unwrap_or(DEFAULT_AUDIO_OFFSET);
         let start = (sub_start - start_offset).max(0.0);
         let duration = sub_end - sub_start + start_offset + end_offset;
 
         debug!(
-            "[media] Audio {:.3}-{:.3} from {}",
+            "[media] Audio ({}) {:.3}-{:.3} from {}",
+            config.format,
             start,
             start + duration,
             media_path
         );
 
+        let mut args = vec![
+            "-ss".into(),
+            format!("{:.3}", start),
+            "-i".into(),
+            media_path.to_string(),
+            "-t".into(),
+            format!("{:.3}", duration),
+            "-map".into(),
+            format!("0:a:{}", (aid - 1).max(0)),
+            "-vn".into(),
+        ];
+
+        config.apply_to_args(&mut args);
+
+        args.extend(["-y".into(), output.display().to_string()]);
+
         Self {
-            args: vec![
-                "-ss".into(),
-                format!("{:.3}", start),
-                "-i".into(),
-                media_path.to_string(),
-                "-t".into(),
-                format!("{:.3}", duration),
-                "-map".into(),
-                format!("0:a:{}", (aid - 1).max(0)),
-                "-vn".into(),
-                "-ac".into(),
-                "2".into(),
-                "-b:a".into(),
-                "128k".into(),
-                "-y".into(),
-                output.display().to_string(),
-            ],
+            args,
             output_path: output,
         }
     }
 
-    pub fn from_type(media_type: MediaType, sub: &Subtitle) -> Self {
-        match media_type {
-            MediaType::Thumbnail => Self::thumbnail(sub),
-            MediaType::Audio => Self::audio(sub, None, None),
-        }
-    }
-
     pub fn execute(self) -> Option<String> {
-        debug!("[media] Running: {} {:?}", ffmpeg(), self.args);
+        info!("[media] Running: {} {}", ffmpeg(), self.args.join(" "));
 
         let result = Command::new(ffmpeg())
             .args(&self.args)
@@ -180,6 +338,10 @@ impl FfmpegRequest {
                     Some(base64::engine::general_purpose::STANDARD.encode(&data))
                 }
                 _ => {
+                    warn!(
+                        "[media] ffmpeg succeeded but output file is empty or missing: {}",
+                        self.output_path.display()
+                    );
                     cleanup();
                     None
                 }

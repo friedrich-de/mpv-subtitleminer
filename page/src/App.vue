@@ -1,45 +1,38 @@
 <script setup lang="ts">
+  import MediaConfiguration from './components/MediaConfiguration.vue'
   import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
   import { useToast } from './composables/useToast'
   import { useWebSocket } from './composables/useWebSocket'
   import * as anki from './services/ankiConnect'
   import { isJsonObject, type JsonObject, type JsonValue } from './types/json'
+  import type { AnkiSettings, ConnectionSettings, MediaSettings, Settings } from './types/settings'
   import { preserveHtmlTags } from './utils/htmlUtils'
 
   const DEFAULT_PORTS = [61777, 61778, 61779, 61780, 61781]
 
   const { toasts, toast, toastIcons, dismissToast } = useToast()
 
-  interface AnkiSettings {
-    noteType: string
-    frontField: string
-    sentenceField: string
-    audioField: string
-    imageField: string
-    maxCardAgeMinutes: number
-  }
-
-  interface ConnectionSettings {
-    host: string
-    ports: number[]
-  }
-
-  interface MediaSettings {
-    audioOffsetStart: number
-    audioOffsetEnd: number
-  }
-
-  interface Settings {
-    anki: AnkiSettings
-    connection: ConnectionSettings
-    media: MediaSettings
-  }
-
   const STORAGE_KEY = 'mpv_subtitle_tool_settings'
   const defaultSettings: Settings = {
     anki: { noteType: '', frontField: '', sentenceField: '', audioField: '', imageField: '', maxCardAgeMinutes: 5 },
     connection: { host: '127.0.0.1', ports: [...DEFAULT_PORTS] },
-    media: { audioOffsetStart: 0.25, audioOffsetEnd: 0.25 },
+    media: {
+      audioOffsetStart: 0.25,
+      audioOffsetEnd: 0.25,
+      imageFormat: 'jpeg',
+      imageQuality: 5,
+      imageAnimated: false,
+      audioFormat: 'mp3',
+      audioQuality: 128,
+      audioFilters: '',
+      imageSize: '640:-2',
+      imageAdvanced: false,
+      imageAdvancedArgs: '',
+      imageAdvancedExtension: '',
+      audioAdvanced: false,
+      audioAdvancedArgs: '',
+      audioAdvancedExtension: '',
+    },
   }
 
   function loadSettings(): Settings {
@@ -158,27 +151,43 @@
     }
   }
 
-  function onMediaChange(field: keyof MediaSettings, value: number) {
-    localMedia.value = { ...localMedia.value, [field]: value }
-  }
-
   function onFieldChange(field: keyof AnkiSettings, value: string | number) {
     // @ts-ignore - dynamic assignment
     localSettings.value = { ...localSettings.value, [field]: value }
   }
 
   function saveSettings() {
-    const audioSettingsChanged =
+    const mediaSettingsChanged =
       localMedia.value.audioOffsetStart !== settings.value.media.audioOffsetStart ||
-      localMedia.value.audioOffsetEnd !== settings.value.media.audioOffsetEnd
+      localMedia.value.audioOffsetEnd !== settings.value.media.audioOffsetEnd ||
+      localMedia.value.imageFormat !== settings.value.media.imageFormat ||
+      localMedia.value.imageQuality !== settings.value.media.imageQuality ||
+      localMedia.value.imageAnimated !== settings.value.media.imageAnimated ||
+      localMedia.value.audioFormat !== settings.value.media.audioFormat ||
+      localMedia.value.audioQuality !== settings.value.media.audioQuality ||
+      localMedia.value.audioFilters !== settings.value.media.audioFilters ||
+      localMedia.value.imageSize !== settings.value.media.imageSize ||
+      localMedia.value.imageAdvanced !== settings.value.media.imageAdvanced ||
+      localMedia.value.imageAdvancedArgs !== settings.value.media.imageAdvancedArgs ||
+      localMedia.value.audioAdvanced !== settings.value.media.audioAdvanced ||
+      localMedia.value.audioAdvancedArgs !== settings.value.media.audioAdvancedArgs
+
+    if (localMedia.value.imageAdvanced) {
+      if (!localMedia.value.imageAdvancedExtension) {
+        localMedia.value.imageAnimated = false
+      }
+    } else if (localMedia.value.imageFormat !== 'avif' && localMedia.value.imageFormat !== 'webp') {
+      localMedia.value.imageAnimated = false
+    }
 
     settings.value.anki = { ...localSettings.value }
     settings.value.connection = { ...localConnection.value }
     settings.value.media = { ...localMedia.value }
     
-    if (audioSettingsChanged) {
+    if (mediaSettingsChanged) {
       for (const msg of messages.value) {
         msg.audio = undefined
+        msg.thumbnail = undefined
       }
     }
 
@@ -487,10 +496,36 @@
     { immediate: true },
   )
 
-  const getAudioParams = () => ({
-    offset_start: settings.value.media.audioOffsetStart,
-    offset_end: settings.value.media.audioOffsetEnd,
-  })
+  const getAudioParams = () => {
+    const media = showSettings.value ? localMedia.value : settings.value.media
+    return {
+      offset_start: media.audioOffsetStart,
+      offset_end: media.audioOffsetEnd,
+      audio_config: {
+        format: media.audioAdvanced ? media.audioAdvancedExtension : media.audioFormat,
+        quality: media.audioQuality,
+        filters: media.audioFilters,
+        advanced_args: media.audioAdvanced
+          ? media.audioAdvancedArgs
+          : null,
+      },
+    }
+  }
+
+  const getImageParams = () => {
+    const media = showSettings.value ? localMedia.value : settings.value.media
+    return {
+      image_config: {
+        format: media.imageAdvanced ? media.imageAdvancedExtension : media.imageFormat,
+        quality: media.imageQuality,
+        is_animated: media.imageAnimated,
+        size: media.imageSize,
+        advanced_args: media.imageAdvanced
+          ? media.imageAdvancedArgs
+          : null,
+      },
+    }
+  }
 
   const sendToPort = (payload: JsonValue, port: number | undefined): boolean => {
     if (!port) return false
@@ -501,7 +536,9 @@
     if (ws.status.value !== 'connected' || msg.thumbnail) return
     const key = `thumb-${msg.uid}`
     if (loadingMedia.value[key]) return
-    if (!sendToPort({ request: 'thumbnail', id: msg.id }, msg.sourcePort)) {
+    const params = getImageParams()
+    const payload = { request: 'thumbnail', id: msg.id, ...params }
+    if (!sendToPort(payload, msg.sourcePort)) {
       toast.error(`Not connected to port ${msg.sourcePort}`)
       return
     }
@@ -551,7 +588,11 @@
       currentAudio.value.pause()
       currentAudio.value = null
     }
-    const audio = new Audio(`data:audio/mpeg;base64,${audioBase64}`)
+    let mimeType = 'audio/ogg; codecs=opus'
+    if (settings.value.media.audioFormat === 'mp3') {
+      mimeType = 'audio/mpeg'
+    }
+    const audio = new Audio(`data:${mimeType};base64,${audioBase64}`)
     currentAudio.value = audio
     audio.addEventListener('ended', () => {
       if (currentAudio.value === audio) {
@@ -563,8 +604,28 @@
 
   const generateMediaFilename = (msgId: number, type: 'audio' | 'image') => {
     const timestamp = Date.now()
-    const ext = type === 'audio' ? 'mp3' : 'jpg'
-    return `mpv_subtitleminer_${msgId}_${timestamp}.${ext}`
+    const media = showSettings.value ? localMedia.value : settings.value.media
+    let ext = 'webp'
+
+    if (type === 'audio') {
+      if (media.audioAdvanced) {
+        ext = media.audioAdvancedExtension || 'mp3'
+      } else {
+        ext = media.audioFormat === 'mp3' ? 'mp3' : 'opus'
+      }
+    } else {
+      if (media.imageAdvanced) {
+        ext = media.imageAdvancedExtension || 'jpg'
+      } else {
+        const fmt = media.imageFormat
+        ext = fmt === 'jpeg' ? 'jpg' : fmt
+      }
+    }
+
+    if (ext.toLowerCase() === 'jpeg') ext = 'jpg'
+    ext = ext.replace(/^\.+/, '')
+
+    return `mpv_subtitleminer_${msgId}_${timestamp}.${ext.toLowerCase()}`
   }
 
   const sendSelectionToAnki = async () => {
@@ -628,9 +689,14 @@
       }
 
       if (imageField) {
-        let imageData = first.thumbnail
+        let imageData = (selectedMsgs.length === 1) ? first.thumbnail : undefined
+
         if (!imageData) {
-          imageData = await requestMediaFromServer(first, 'thumbnail')
+          imageData = await requestMediaFromServer(
+            first, 
+            'thumbnail', 
+            selectedMsgs.length > 1 ? last.id : undefined
+          )
         }
         if (imageData) {
           const filename = generateMediaFilename(primaryId, 'image')
@@ -669,6 +735,7 @@
   const requestMediaFromServer = (
     msg: SubtitleMessage,
     type: 'audio' | 'thumbnail',
+    endId?: number,
   ): Promise<string | undefined> => {
     return new Promise((resolve) => {
       if (ws.status.value !== 'connected') {
@@ -676,7 +743,7 @@
         return
       }
 
-      const key = `${type === 'thumbnail' ? 'thumb' : 'audio'}-${msg.uid}`
+      const key = `${type === 'thumbnail' ? 'thumb' : 'audio'}-${msg.uid}${endId ? `-${endId}` : ''}`
       if (loadingMedia.value[key]) {
         const checkInterval = setInterval(() => {
           if (type === 'thumbnail' && msg.thumbnail) {
@@ -699,9 +766,11 @@
       }
 
       loadingMedia.value[key] = true
-      const payload: Record<string, JsonValue> = { request: type, id: msg.id }
-      if (type === 'audio') {
-        Object.assign(payload, getAudioParams())
+      const payload: Record<string, JsonValue> = {
+        request: type,
+        id: msg.id,
+        ...(endId ? { end_id: endId } : {}),
+        ...(type === 'thumbnail' ? getImageParams() : getAudioParams()),
       }
       
       if (!sendToPort(payload, msg.sourcePort)) {
@@ -873,7 +942,7 @@
                 v-if="hoveredThumbnailUid === message.uid && message.thumbnail"
                 class="thumb-preview"
               >
-                <img :src="`data:image/jpeg;base64,${message.thumbnail}`" alt="Thumbnail" />
+                <img :src="`data:image/${settings.media.imageFormat};base64,${message.thumbnail}`" alt="Thumbnail" />
               </div>
             </div>
             <button
@@ -1025,53 +1094,6 @@
 
             <section class="section">
               <div class="section-header">
-                <h3>Media configuration</h3>
-              </div>
-              <div class="form-grid">
-                <label class="form-group">
-                  <span>Start offset (seconds)</span>
-                  <div class="input-group">
-                    <input
-                      type="number"
-                      step="0.05"
-                      :value="localMedia.audioOffsetStart"
-                      @input="(e) => onMediaChange('audioOffsetStart', parseFloat((e.target as HTMLInputElement).value) || 0)"
-                    />
-                    <button 
-                      class="btn-reset" 
-                      :class="{ visible: localMedia.audioOffsetStart !== defaultSettings.media.audioOffsetStart }"
-                      :title="`Reset to default (${defaultSettings.media.audioOffsetStart}s)`"
-                      @click="onMediaChange('audioOffsetStart', defaultSettings.media.audioOffsetStart)"
-                    >
-                      ↺
-                    </button>
-                  </div>
-                </label>
-                <label class="form-group">
-                  <span>End offset (seconds)</span>
-                  <div class="input-group">
-                    <input
-                      type="number"
-                      step="0.05"
-                      :value="localMedia.audioOffsetEnd"
-                      @input="(e) => onMediaChange('audioOffsetEnd', parseFloat((e.target as HTMLInputElement).value) || 0)"
-                    />
-                    <button 
-                      class="btn-reset" 
-                      :class="{ visible: localMedia.audioOffsetEnd !== defaultSettings.media.audioOffsetEnd }"
-                      :title="`Reset to default (${defaultSettings.media.audioOffsetEnd}s)`"
-                      @click="onMediaChange('audioOffsetEnd', defaultSettings.media.audioOffsetEnd)"
-                    >
-                      ↺
-                    </button>
-                  </div>
-                </label>
-              </div>
-              <small class="field-hint full-width">Positive extends audio, negative trims it.</small>
-            </section>
-
-            <section class="section">
-              <div class="section-header">
                 <h3>Card configuration</h3>
                 <span v-if="connectionStatus !== 'connected'" class="subtle"
                   >Connect first to load models</span
@@ -1172,6 +1194,16 @@
                 <div v-if="loadingModels" class="muted-box">Loading note types…</div>
                 <div v-else-if="modelsError" class="error-text">{{ modelsError }}</div>
               </div>
+            </section>
+
+            <section class="section">
+              <div class="section-header">
+                <h3>Media configuration</h3>
+              </div>
+              <MediaConfiguration 
+                v-model="localMedia" 
+                :default-settings="defaultSettings"
+              />
             </section>
           </div>
 
@@ -1318,15 +1350,18 @@
     position: relative;
   }
 
-  .input-group input {
+  .input-group input,
+  .input-group select {
     width: 100%;
-    padding-right: 32px; /* Space for reset button */
+    padding-right: 32px;
     -moz-appearance: textfield;
+    appearance: none;
   }
 
   .input-group input::-webkit-outer-spin-button,
   .input-group input::-webkit-inner-spin-button {
     -webkit-appearance: none;
+    appearance: none;
     margin: 0;
   }
 
