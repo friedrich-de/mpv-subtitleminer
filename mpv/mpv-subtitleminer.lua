@@ -2,7 +2,7 @@ local utils = require("mp.utils")
 local options = require("mp.options")
 
 local opts = {
-  -- Either adjust settings here OR in script-opts/run_server.conf
+  -- Either adjust settings here OR in script-opts/mpv-subtitleminer.conf
   -- ========== SETTINGS ==========
   -- List of ports to try starting the server on.
   ports = { 61777, 61778, 61779, 61780, 61781 },
@@ -11,7 +11,7 @@ local opts = {
   -- ==============================
 }
 
-options.read_options(opts, "run_server")
+options.read_options(opts, "mpv-subtitleminer")
 
 -- Convert ports from string to table if needed
 if type(opts.ports) == "string" then
