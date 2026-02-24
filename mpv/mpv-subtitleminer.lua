@@ -7,7 +7,9 @@ local opts = {
   -- List of ports to try starting the server on.
   ports = { 61777, 61778, 61779, 61780, 61781 },
   -- When true (default), starts the mpv-subtitleminer server automatically on mpv startup.
-  auto_start = true,
+    auto_start = true,
+    -- When true, auto_start will launch the server regardless of whether Japanese text subtitles are detected.
+    force_start = false,
   -- ==============================
 }
 
@@ -158,6 +160,104 @@ local server_running = false
 local current_port = nil
 local startup_timer = nil
 
+-- Text-based subtitle internal subs formats (ffmpeg codec names)
+local TEXT_SUB_CODECS = {
+  ["subrip"] = true,
+  ["ass"] = true,
+  ["ssa"] = true,
+  ["webvtt"] = true,
+  ["mov_text"] = true,
+  ["text"] = true,
+  ["srt"] = true,
+  ["microdvd"] = true,
+  ["jacosub"] = true,
+  ["sami"] = true,
+  ["realtext"] = true,
+  ["subviewer"] = true,
+  ["subviewer1"] = true,
+  ["vplayer"] = true,
+  ["pjs"] = true,
+  ["mpl2"] = true,
+  ["stl"] = true,
+  ["ttml"] = true,
+  ["lrc"] = true,
+}
+
+-- External subtitle file extensions that are text-based
+local TEXT_SUB_EXTENSIONS = {
+  ["srt"] = true,
+  ["ass"] = true,
+  ["ssa"] = true,
+  ["vtt"] = true,
+  ["sub"] = true,
+  ["smi"] = true,
+  ["rt"]  = true,
+  ["txt"] = true,
+  ["lrc"] = true,
+  ["ttml"] = true,
+  ["dfxp"] = true,
+  ["stl"] = true,
+}
+
+local JAPANESE_LANG_CODES = {
+  ["ja"] = true,
+  ["jp"] = true,
+  ["jpn"] = true,
+  ["japanese"] = true,
+  ["ja-jp"] = true,
+}
+
+local function is_japanese_lang(lang)
+  if not lang or lang == "" then return false end
+  return JAPANESE_LANG_CODES[lang:lower()] ~= nil
+end
+
+local function is_text_codec(codec)
+  if not codec or codec == "" then return false end
+  return TEXT_SUB_CODECS[codec:lower()] ~= nil
+end
+
+local function is_text_extension(path)
+  if not path or path == "" then return false end
+  local ext = path:match("%.([^%.]+)$")
+  if not ext then return false end
+  return TEXT_SUB_EXTENSIONS[ext:lower()] ~= nil
+end
+
+local function has_japanese_text_subs()
+  local track_count = mp.get_property_native("track-list/count") or 0
+  for i = 0, track_count - 1 do
+    local base = "track-list/" .. i
+    local track_type = mp.get_property(base .. "/type")
+    if track_type == "sub" then
+      local lang        = mp.get_property(base .. "/lang") or ""
+      local codec       = mp.get_property(base .. "/codec") or ""
+      local title       = mp.get_property(base .. "/title") or ""
+      local ext_path    = mp.get_property(base .. "/external-filename") or ""
+      local is_external = mp.get_property_native(base .. "/external") or false
+
+      local lang_ok = is_japanese_lang(lang)
+      if not lang_ok then
+        lang_ok = title:lower():find("jap") ~= nil or title:lower():find("日本語") ~= nil
+      end
+
+      local format_ok
+      if is_external then
+        format_ok = is_text_extension(ext_path) or is_text_codec(codec)
+      else
+        format_ok = is_text_codec(codec)
+      end
+
+      if lang_ok and format_ok then
+        mp.msg.info("[mpv-subtitleminer] Found Japanese text subtitle track: lang=" ..
+          lang .. " codec=" .. codec .. (is_external and (" file=" .. ext_path) or ""))
+        return true
+      end
+    end
+  end
+  return false
+end
+
 local function get_mpv_pid()
   local pid = mp.get_property_native("pid") or mp.get_property_native("process-id")
   if type(pid) == "number" and pid > 0 then
@@ -302,16 +402,29 @@ local function stop_server()
 end
 
 local function toggle_server()
-  if server_running or server_process then
-    stop_server()
-  else
+    if server_running or server_process then
+        stop_server()
+    else
+        start_server()
+    end
+end
+
+local function auto_start_if_japanese()
+  if not opts.auto_start then return end
+  if opts.force_start then
+    mp.msg.info("[mpv-subtitleminer] force_start enabled, starting server unconditionally...")
     start_server()
+  elseif has_japanese_text_subs() then
+    mp.msg.info("[mpv-subtitleminer] Japanese text subtitles detected, starting server...")
+    start_server()
+  else
+    mp.msg.info("[mpv-subtitleminer] No Japanese text subtitles found, server will not auto-start")
   end
 end
 
 if opts.auto_start then
   mp.add_timeout(1, function()
-    start_server()
+        auto_start_if_japanese()
   end)
 end
 
