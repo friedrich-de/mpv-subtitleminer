@@ -15,6 +15,7 @@ use crate::mpv_stream::MpvStream;
 pub struct Subtitle {
     pub id: u64,
     pub text: String,
+    pub secondary_text: Option<String>,
     pub sub_start: f64,
     pub sub_end: f64,
     pub media_path: String,
@@ -36,7 +37,8 @@ impl SharedState {
 struct PendingSubtitle {
     id: u64,
     text: String,
-    responses: [Option<serde_json::Value>; 4], // sub_start, sub_end, path, aid
+    // indices: 0=sub_start, 1=sub_end, 2=path, 3=aid, 4=secondary-sub-text
+    responses: [Option<serde_json::Value>; 5],
 }
 
 impl PendingSubtitle {
@@ -49,19 +51,29 @@ impl PendingSubtitle {
     }
 
     fn set_response(&mut self, index: usize, value: serde_json::Value) {
-        if index < 4 {
+        if index < 5 {
             self.responses[index] = Some(value);
         }
     }
 
     fn is_complete(&self) -> bool {
-        self.responses.iter().all(|r| r.is_some())
+        // indices 0-3 are required; index 4 (secondary sub) is optional but we
+        // still wait for its response (it may be null / error) before emitting.
+        self.responses[..4].iter().all(|r| r.is_some()) && self.responses[4].is_some()
     }
 
     fn into_subtitle(self) -> Subtitle {
+        // Secondary subtitle: the value may be a string or null (JSON null means no secondary sub).
+        let secondary_text = self.responses[4]
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         Subtitle {
             id: self.id,
             text: self.text,
+            secondary_text,
             sub_start: self.responses[0].as_ref().unwrap().as_f64().unwrap(),
             sub_end: self.responses[1].as_ref().unwrap().as_f64().unwrap(),
             media_path: self.responses[2]
@@ -240,10 +252,17 @@ async fn handle_mpv(
             let base_id = request_id / 10 * 10; // Round down to base
             let prop_idx = (request_id % 10) as usize;
 
-            if let Some(p) = pending.get_mut(&base_id)
-                && let Some(data) = json.get("data").cloned()
-            {
-                p.set_response(prop_idx, data);
+            if let Some(p) = pending.get_mut(&base_id) {
+                // For secondary-sub-text (index 4), accept both string data and error
+                // responses (error means no secondary sub is active).
+                let value = if prop_idx == 4 {
+                    json.get("data").cloned().unwrap_or(serde_json::Value::Null)
+                } else if let Some(data) = json.get("data").cloned() {
+                    data
+                } else {
+                    continue;
+                };
+                p.set_response(prop_idx, value);
             }
 
             // Try to complete pending subtitles
@@ -275,18 +294,20 @@ async fn handle_mpv(
             let base_id = next_request_id;
             next_request_id += 10;
 
-            // Query all properties we need
+            // Query all properties we need (index 4 = secondary-sub-text)
             let cmd = format!(
                 concat!(
                     "{{\"command\":[\"get_property\",\"sub-start\"],\"request_id\":{0}}}\n",
                     "{{\"command\":[\"get_property\",\"sub-end\"],\"request_id\":{1}}}\n",
                     "{{\"command\":[\"get_property\",\"path\"],\"request_id\":{2}}}\n",
-                    "{{\"command\":[\"get_property\",\"aid\"],\"request_id\":{3}}}\n"
+                    "{{\"command\":[\"get_property\",\"aid\"],\"request_id\":{3}}}\n",
+                    "{{\"command\":[\"get_property\",\"secondary-sub-text\"],\"request_id\":{4}}}\n"
                 ),
                 base_id,
                 base_id + 1,
                 base_id + 2,
-                base_id + 3
+                base_id + 3,
+                base_id + 4
             );
 
             mpv.write_all(cmd.as_bytes()).await?;
@@ -312,6 +333,7 @@ async fn handle_client(
                     "type": "subtitle",
                     "id": sub.id,
                     "subtitle": sub.text,
+                    "secondary_subtitle": sub.secondary_text,
                     "sub_start": sub.sub_start,
                     "sub_end": sub.sub_end,
                 });
