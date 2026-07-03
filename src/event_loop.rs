@@ -89,6 +89,13 @@ fn parse_ass_dialogue(s: &str) -> Option<(f64, f64, &str, &str, String)> {
     Some((start, end, style, name, strip_ass_text(text)))
 }
 
+/// Applies mpv's `sub-delay`/`secondary-sub-delay` (in seconds) to a raw
+/// Dialogue start/end pair so recorded audio/subtitle timing matches what's
+/// actually shown on screen.
+fn apply_sub_delay(start: f64, end: f64, delay: f64) -> (f64, f64) {
+    (start + delay, end + delay)
+}
+
 #[derive(Clone)]
 pub struct Subtitle {
     pub id: u64,
@@ -432,11 +439,12 @@ async fn handle_mpv(
             let subtitle_id = next_subtitle_id;
             next_subtitle_id += 1;
 
+            let (delayed_start, delayed_end) = apply_sub_delay(raw_start, raw_end, delay);
             let sub = Subtitle {
                 id: subtitle_id,
                 text,
-                sub_start: raw_start + delay,
-                sub_end: raw_end + delay,
+                sub_start: delayed_start,
+                sub_end: delayed_end,
                 media_path: media_path.clone(),
                 aid: current_aid,
                 track,
@@ -693,6 +701,13 @@ mod tests {
         assert_eq!(style, "Default");
         assert_eq!(name, "");
         assert_eq!(text, "Wait, stop!"); // comma in the Text field is preserved
+    }
+
+    #[test]
+    fn sub_delay_shifts_start_and_end() {
+        assert_eq!(apply_sub_delay(1.0, 3.5, 0.5), (1.5, 4.0));
+        assert_eq!(apply_sub_delay(2.0, 4.0, -1.0), (1.0, 3.0));
+        assert_eq!(apply_sub_delay(1.0, 3.0, 0.0), (1.0, 3.0));
     }
 
     #[test]
