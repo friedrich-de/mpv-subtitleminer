@@ -43,11 +43,16 @@ impl SubtitleMode {
 
 fn parse_mpv_version(s: &str) -> Option<(u64, u64, u64)> {
     let mut tokens = s.split_whitespace();
-    if !tokens.next()?.eq_ignore_ascii_case("mpv") {
+    let label = tokens.next()?;
+    if !label
+        .as_bytes()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"mpv"))
+    {
         return None;
     }
 
-    let token = tokens.next()?;
+    let token = tokens.next()?.trim_start_matches(['v', 'V']);
     let numeric: String = token
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.')
@@ -961,7 +966,8 @@ mod tests {
             parse_mpv_version("mpv 0.40.1-123-gabcdef"),
             Some((0, 40, 1))
         );
-        assert_eq!(parse_mpv_version("mpv-x86_64-v3 0.40.1"), None);
+        assert_eq!(parse_mpv_version("mpv-x86_64-v3 0.40.1"), Some((0, 40, 1)));
+        assert_eq!(parse_mpv_version("MPV v0.39.0"), Some((0, 39, 0)));
         assert_eq!(parse_mpv_version("custom 2024.09.01"), None);
         assert_eq!(parse_mpv_version("not a version"), None);
     }
@@ -970,6 +976,10 @@ mod tests {
     fn subtitle_mode_selects_legacy_for_old_or_unknown_versions() {
         assert_eq!(
             subtitle_mode_from_mpv_version("mpv 0.36.0"),
+            Some(SubtitleMode::Legacy)
+        );
+        assert_eq!(
+            subtitle_mode_from_mpv_version("mpv-x86_64-v3 v0.38.0"),
             Some(SubtitleMode::Legacy)
         );
         assert_eq!(subtitle_mode_from_mpv_version("custom build"), None);
@@ -983,6 +993,10 @@ mod tests {
         );
         assert_eq!(
             subtitle_mode_from_mpv_version("mpv 0.40.1"),
+            Some(SubtitleMode::AssFull)
+        );
+        assert_eq!(
+            subtitle_mode_from_mpv_version("mpv-x86_64-v3 0.40.1"),
             Some(SubtitleMode::AssFull)
         );
     }
