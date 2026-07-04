@@ -11,7 +11,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use crate::media::FfmpegRequest;
 use crate::mpv_stream::MpvStream;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SubtitleTrack {
     Primary,
     Secondary,
@@ -23,6 +23,48 @@ impl SubtitleTrack {
             SubtitleTrack::Primary => "primary",
             SubtitleTrack::Secondary => "secondary",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubtitleMode {
+    AssFull,
+    Legacy,
+}
+
+impl SubtitleMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            SubtitleMode::AssFull => "ass-full",
+            SubtitleMode::Legacy => "legacy",
+        }
+    }
+}
+
+fn parse_mpv_version(s: &str) -> Option<(u64, u64, u64)> {
+    let mut tokens = s.split_whitespace();
+    if !tokens.next()?.eq_ignore_ascii_case("mpv") {
+        return None;
+    }
+
+    let token = tokens.next()?;
+    let numeric: String = token
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = numeric.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+fn subtitle_mode_from_mpv_version(s: &str) -> Option<SubtitleMode> {
+    let version = parse_mpv_version(s)?;
+    if version >= (0, 39, 0) {
+        Some(SubtitleMode::AssFull)
+    } else {
+        Some(SubtitleMode::Legacy)
     }
 }
 
@@ -179,6 +221,91 @@ impl SharedState {
     }
 }
 
+fn build_legacy_subtitle(
+    id: u64,
+    text: String,
+    timing: [Option<f64>; 2],
+    media_path: String,
+    aid: i64,
+    track: SubtitleTrack,
+    delay: f64,
+) -> Option<Subtitle> {
+    let raw_start = timing[0]?;
+    let raw_end = timing[1]?;
+    Some(Subtitle {
+        id,
+        text,
+        sub_start: raw_start + delay,
+        sub_end: raw_end + delay,
+        media_path,
+        aid,
+        track,
+        style: String::new(),
+        name: String::new(),
+    })
+}
+
+struct PendingLegacySubtitle {
+    id: u64,
+    text: String,
+    track: SubtitleTrack,
+    media_path: String,
+    aid: i64,
+    delay: f64,
+    timing: [Option<f64>; 2],
+    received: [bool; 2],
+}
+
+impl PendingLegacySubtitle {
+    fn new(
+        id: u64,
+        text: String,
+        track: SubtitleTrack,
+        media_path: String,
+        aid: i64,
+        delay: f64,
+    ) -> Self {
+        Self {
+            id,
+            text,
+            track,
+            media_path,
+            aid,
+            delay,
+            timing: [None, None],
+            received: [false, false],
+        }
+    }
+
+    fn set_timing_response(&mut self, index: usize, value: Option<&serde_json::Value>) {
+        if index >= self.timing.len() {
+            return;
+        }
+        self.received[index] = true;
+        self.timing[index] = value.and_then(|v| v.as_f64());
+    }
+
+    fn is_complete(&self) -> bool {
+        self.received.iter().all(|received| *received)
+    }
+
+    fn raw_start(&self) -> Option<f64> {
+        self.timing[0]
+    }
+
+    fn to_subtitle(&self) -> Option<Subtitle> {
+        build_legacy_subtitle(
+            self.id,
+            self.text.clone(),
+            self.timing,
+            self.media_path.clone(),
+            self.aid,
+            self.track,
+            self.delay,
+        )
+    }
+}
+
 async fn query_mpv_property(
     mpv: &mut MpvStream,
     property: &str,
@@ -232,9 +359,10 @@ async fn get_mpv_pid(mpv: &mut MpvStream) -> std::io::Result<u32> {
     };
     let status = json.get("error").and_then(|e| e.as_str()).unwrap_or("");
     if status != "success" {
-        return Err(std::io::Error::other(
-            format!("mpv returned error querying PID: {}", status),
-        ));
+        return Err(std::io::Error::other(format!(
+            "mpv returned error querying PID: {}",
+            status
+        )));
     }
 
     let pid = json
@@ -254,6 +382,58 @@ async fn get_mpv_pid(mpv: &mut MpvStream) -> std::io::Result<u32> {
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "mpv PID out of range"))
 }
 
+async fn detect_subtitle_mode(mpv: &mut MpvStream) -> SubtitleMode {
+    let mut detected_version: Option<String> = None;
+    let mode = match query_mpv_property_with_timeout(mpv, "mpv-version", 3).await {
+        Ok(json) => {
+            let status = json.get("error").and_then(|e| e.as_str()).unwrap_or("");
+            if status != "success" {
+                warn!(
+                    "mpv-version query returned '{}'; falling back to legacy subtitle mode",
+                    status
+                );
+                SubtitleMode::Legacy
+            } else if let Some(version) = json.get("data").and_then(|d| d.as_str()) {
+                detected_version = Some(version.to_string());
+                match subtitle_mode_from_mpv_version(version) {
+                    Some(SubtitleMode::AssFull) => SubtitleMode::AssFull,
+                    Some(SubtitleMode::Legacy) => {
+                        warn!(
+                            "mpv version '{}' predates sub-text/ass-full; falling back to legacy subtitle mode",
+                            version
+                        );
+                        SubtitleMode::Legacy
+                    }
+                    None => {
+                        warn!(
+                            "Could not parse mpv version '{}'; falling back to legacy subtitle mode",
+                            version
+                        );
+                        SubtitleMode::Legacy
+                    }
+                }
+            } else {
+                warn!("mpv-version query returned no string; falling back to legacy subtitle mode");
+                SubtitleMode::Legacy
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Failed to query mpv-version: {}; falling back to legacy subtitle mode",
+                e
+            );
+            SubtitleMode::Legacy
+        }
+    };
+
+    info!(
+        "Selected {} subtitle mode (mpv version: {})",
+        mode.as_str(),
+        detected_version.as_deref().unwrap_or("unknown")
+    );
+    mode
+}
+
 pub async fn run_server(
     socket_path: &str,
     port: u16,
@@ -263,14 +443,13 @@ pub async fn run_server(
     if let Some(expected) = expected_mpv_pid {
         let actual = get_mpv_pid(&mut mpv).await?;
         if actual != expected {
-            return Err(std::io::Error::other(
-                format!(
-                    "MPV_IPC_PID_MISMATCH expected={} actual={} socket={}",
-                    expected, actual, socket_path
-                ),
-            ));
+            return Err(std::io::Error::other(format!(
+                "MPV_IPC_PID_MISMATCH expected={} actual={} socket={}",
+                expected, actual, socket_path
+            )));
         }
     }
+    let subtitle_mode = detect_subtitle_mode(&mut mpv).await;
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
 
     println!(
@@ -286,7 +465,7 @@ pub async fn run_server(
     let mpv_state = state.clone();
     let mpv_tx = subtitle_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = handle_mpv(mpv, mpv_state, mpv_tx).await {
+        if let Err(e) = handle_mpv(mpv, subtitle_mode, mpv_state, mpv_tx).await {
             error!("MPV handler error: {}", e);
         }
         info!("MPV connection closed, shutting down.");
@@ -315,19 +494,33 @@ pub async fn run_server(
 
 async fn handle_mpv(
     mut mpv: MpvStream,
+    subtitle_mode: SubtitleMode,
     state: Arc<SharedState>,
     tx: broadcast::Sender<SubtitleEvent>,
 ) -> std::io::Result<()> {
-    mpv.write_all(
-        b"{\"command\":[\"observe_property\",1,\"sub-text/ass-full\"]}\n\
+    let observe_commands: &[u8] = match subtitle_mode {
+        SubtitleMode::AssFull => {
+            b"{\"command\":[\"observe_property\",1,\"sub-text/ass-full\"]}\n\
           {\"command\":[\"observe_property\",2,\"secondary-sub-text/ass-full\"]}\n\
           {\"command\":[\"observe_property\",3,\"path\"]}\n\
           {\"command\":[\"observe_property\",4,\"aid\"]}\n\
           {\"command\":[\"observe_property\",5,\"sub-delay\"]}\n\
-          {\"command\":[\"observe_property\",6,\"secondary-sub-delay\"]}\n",
-    )
-    .await?;
-    info!("Connected to mpv, observing subtitle changes");
+          {\"command\":[\"observe_property\",6,\"secondary-sub-delay\"]}\n"
+        }
+        SubtitleMode::Legacy => {
+            b"{\"command\":[\"observe_property\",1,\"sub-text\"]}\n\
+          {\"command\":[\"observe_property\",2,\"secondary-sub-text\"]}\n\
+          {\"command\":[\"observe_property\",3,\"path\"]}\n\
+          {\"command\":[\"observe_property\",4,\"aid\"]}\n\
+          {\"command\":[\"observe_property\",5,\"sub-delay\"]}\n\
+          {\"command\":[\"observe_property\",6,\"secondary-sub-delay\"]}\n"
+        }
+    };
+    mpv.write_all(observe_commands).await?;
+    info!(
+        "Connected to mpv, observing subtitle changes with {} mode",
+        subtitle_mode.as_str()
+    );
 
     let mut current_path: Option<String> = None;
     // Latest selected audio track id, kept current via the `aid` observe (id 4)
@@ -339,6 +532,8 @@ async fn handle_mpv(
     let mut current_sub_delay: f64 = 0.0;
     let mut current_secondary_sub_delay: f64 = 0.0;
     let mut next_subtitle_id = 1u64;
+    let mut pending_legacy: HashMap<u64, PendingLegacySubtitle> = HashMap::new();
+    let mut next_legacy_request_id = 10u64;
     let mut line = String::new();
 
     loop {
@@ -350,6 +545,59 @@ async fn handle_mpv(
         let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+
+        if subtitle_mode == SubtitleMode::Legacy
+            && let Some(request_id) = json.get("request_id").and_then(|r| r.as_u64())
+        {
+            let base_id = request_id / 10 * 10;
+            let prop_idx = (request_id % 10) as usize;
+            if prop_idx < 2 {
+                let completed = if let Some(pending) = pending_legacy.get_mut(&base_id) {
+                    pending.set_timing_response(prop_idx, json.get("data"));
+                    pending.is_complete()
+                } else {
+                    false
+                };
+
+                if completed {
+                    let pending = pending_legacy.remove(&base_id).unwrap();
+                    let Some(raw_start) = pending.raw_start() else {
+                        debug!(
+                            "[{}:{}] Dropping legacy subtitle due to missing start timing",
+                            pending.track.as_str(),
+                            pending.id
+                        );
+                        continue;
+                    };
+                    let Some(sub) = pending.to_subtitle() else {
+                        debug!(
+                            "[{}:{}] Dropping legacy subtitle due to missing timing",
+                            pending.track.as_str(),
+                            pending.id
+                        );
+                        continue;
+                    };
+
+                    let bucket = (raw_start * 1000.0).round() as i64 / DEDUP_BUCKET_MS;
+                    let key = (
+                        sub.track,
+                        bucket,
+                        sub.style.clone(),
+                        sub.name.clone(),
+                        sub.text.clone(),
+                    );
+                    if !state.recent.lock().await.insert(key) {
+                        continue;
+                    }
+
+                    debug!("[{}:{}] Broadcasting", sub.track.as_str(), sub.id);
+                    info!("[{}:{}] {}", sub.track.as_str(), sub.id, sub.text);
+                    state.subtitles.write().await.insert(sub.id, sub.clone());
+                    let _ = tx.send(SubtitleEvent::New(sub));
+                }
+                continue;
+            }
+        }
 
         if json.get("event") != Some(&serde_json::json!("property-change")) {
             continue;
@@ -392,15 +640,13 @@ async fn handle_mpv(
         }
 
         // Subtitle changed: primary (observer id 1) or secondary (observer id 2).
-        // The payload is the `sub-text/ass-full` value: zero or more `Dialogue:`
-        // lines (joined by newlines) describing every event currently on screen.
         let track = match observer_id {
             Some(1) => SubtitleTrack::Primary,
             Some(2) => SubtitleTrack::Secondary,
             _ => continue,
         };
 
-        let Some(ass_full) = json.get("data").and_then(|d| d.as_str()) else {
+        let Some(payload) = json.get("data").and_then(|d| d.as_str()) else {
             continue;
         };
 
@@ -410,43 +656,97 @@ async fn handle_mpv(
         };
         let media_path = current_path.clone().unwrap_or_default();
 
-        // Each Dialogue line carries its own absolute Start/End, so overlapping
-        // events become independent rows with correct timing.
-        for dialogue in ass_full.lines() {
-            let Some((raw_start, raw_end, style, name, text)) = parse_ass_dialogue(dialogue)
-            else {
-                continue;
-            };
-            if text.is_empty() {
-                continue;
+        match subtitle_mode {
+            SubtitleMode::AssFull => {
+                // Each Dialogue line carries its own absolute Start/End, so overlapping
+                // events become independent rows with correct timing.
+                for dialogue in payload.lines() {
+                    let Some((raw_start, raw_end, style, name, text)) =
+                        parse_ass_dialogue(dialogue)
+                    else {
+                        continue;
+                    };
+                    if text.is_empty() {
+                        continue;
+                    }
+
+                    // Bucket the raw (pre-delay) start so re-reports collapse but the
+                    // same text recurring later stays a distinct row.
+                    let bucket = (raw_start * 1000.0).round() as i64 / DEDUP_BUCKET_MS;
+                    let key = (
+                        track,
+                        bucket,
+                        style.to_string(),
+                        name.to_string(),
+                        text.clone(),
+                    );
+                    if !state.recent.lock().await.insert(key) {
+                        continue;
+                    }
+
+                    let subtitle_id = next_subtitle_id;
+                    next_subtitle_id += 1;
+
+                    let sub = Subtitle {
+                        id: subtitle_id,
+                        text,
+                        sub_start: raw_start + delay,
+                        sub_end: raw_end + delay,
+                        media_path: media_path.clone(),
+                        aid: current_aid,
+                        track,
+                        style: style.to_string(),
+                        name: name.to_string(),
+                    };
+                    debug!("[{}:{}] Broadcasting", track.as_str(), subtitle_id);
+                    info!("[{}:{}] {}", track.as_str(), subtitle_id, sub.text);
+                    state
+                        .subtitles
+                        .write()
+                        .await
+                        .insert(subtitle_id, sub.clone());
+                    let _ = tx.send(SubtitleEvent::New(sub));
+                }
             }
+            SubtitleMode::Legacy => {
+                if payload.is_empty() {
+                    continue;
+                }
 
-            // Bucket the raw (pre-delay) start so re-reports collapse but the
-            // same text recurring later stays a distinct row.
-            let bucket = (raw_start * 1000.0).round() as i64 / DEDUP_BUCKET_MS;
-            let key = (track, bucket, style.to_string(), name.to_string(), text.clone());
-            if !state.recent.lock().await.insert(key) {
-                continue;
+                let subtitle_id = next_subtitle_id;
+                next_subtitle_id += 1;
+
+                let base_id = next_legacy_request_id;
+                next_legacy_request_id += 10;
+
+                let (start_property, end_property) = match track {
+                    SubtitleTrack::Primary => ("sub-start", "sub-end"),
+                    SubtitleTrack::Secondary => ("secondary-sub-start", "secondary-sub-end"),
+                };
+                let cmd = format!(
+                    concat!(
+                        "{{\"command\":[\"get_property\",\"{}\"],\"request_id\":{}}}\n",
+                        "{{\"command\":[\"get_property\",\"{}\"],\"request_id\":{}}}\n"
+                    ),
+                    start_property,
+                    base_id,
+                    end_property,
+                    base_id + 1
+                );
+
+                mpv.write_all(cmd.as_bytes()).await?;
+                pending_legacy.insert(
+                    base_id,
+                    PendingLegacySubtitle::new(
+                        subtitle_id,
+                        payload.to_string(),
+                        track,
+                        media_path,
+                        current_aid,
+                        delay,
+                    ),
+                );
             }
-
-            let subtitle_id = next_subtitle_id;
-            next_subtitle_id += 1;
-
-            let sub = Subtitle {
-                id: subtitle_id,
-                text,
-                sub_start: raw_start + delay,
-                sub_end: raw_end + delay,
-                media_path: media_path.clone(),
-                aid: current_aid,
-                track,
-                style: style.to_string(),
-                name: name.to_string(),
-            };
-            debug!("[{}:{}] Broadcasting", track.as_str(), subtitle_id);
-            info!("[{}:{}] {}", track.as_str(), subtitle_id, sub.text);
-            state.subtitles.write().await.insert(subtitle_id, sub.clone());
-            let _ = tx.send(SubtitleEvent::New(sub));
         }
         continue;
     }
@@ -581,13 +881,18 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
         }
         _ => {
             let (subtitle_id, media_type, ffmpeg_req) = match request {
-                ProtocolRequest::Thumbnail { id, end_id, image_config } => {
+                ProtocolRequest::Thumbnail {
+                    id,
+                    end_id,
+                    image_config,
+                } => {
                     let store = state.subtitles.read().await;
                     let mut sub = store.get(&id)?.clone();
                     if let Some(eid) = end_id
-                        && let Some(end_sub) = store.get(&eid) {
-                            sub.sub_end = end_sub.sub_end;
-                        }
+                        && let Some(end_sub) = store.get(&eid)
+                    {
+                        sub.sub_end = end_sub.sub_end;
+                    }
                     drop(store);
                     (
                         id,
@@ -649,6 +954,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mpv_version_parser_handles_common_versions() {
+        assert_eq!(parse_mpv_version("mpv 0.36.0"), Some((0, 36, 0)));
+        assert_eq!(parse_mpv_version("mpv 0.39.0"), Some((0, 39, 0)));
+        assert_eq!(
+            parse_mpv_version("mpv 0.40.1-123-gabcdef"),
+            Some((0, 40, 1))
+        );
+        assert_eq!(parse_mpv_version("mpv-x86_64-v3 0.40.1"), None);
+        assert_eq!(parse_mpv_version("custom 2024.09.01"), None);
+        assert_eq!(parse_mpv_version("not a version"), None);
+    }
+
+    #[test]
+    fn subtitle_mode_selects_legacy_for_old_or_unknown_versions() {
+        assert_eq!(
+            subtitle_mode_from_mpv_version("mpv 0.36.0"),
+            Some(SubtitleMode::Legacy)
+        );
+        assert_eq!(subtitle_mode_from_mpv_version("custom build"), None);
+    }
+
+    #[test]
+    fn subtitle_mode_selects_ass_full_for_mpv_0_39_or_newer() {
+        assert_eq!(
+            subtitle_mode_from_mpv_version("mpv 0.39.0"),
+            Some(SubtitleMode::AssFull)
+        );
+        assert_eq!(
+            subtitle_mode_from_mpv_version("mpv 0.40.1"),
+            Some(SubtitleMode::AssFull)
+        );
+    }
+
+    #[test]
+    fn legacy_subtitle_builder_applies_delay_and_defaults_metadata() {
+        let sub = build_legacy_subtitle(
+            7,
+            "hello".to_string(),
+            [Some(1.0), Some(3.5)],
+            "movie.mkv".to_string(),
+            2,
+            SubtitleTrack::Secondary,
+            0.25,
+        )
+        .unwrap();
+
+        assert_eq!(sub.id, 7);
+        assert_eq!(sub.text, "hello");
+        assert_eq!(sub.sub_start, 1.25);
+        assert_eq!(sub.sub_end, 3.75);
+        assert_eq!(sub.media_path, "movie.mkv");
+        assert_eq!(sub.aid, 2);
+        assert_eq!(sub.track, SubtitleTrack::Secondary);
+        assert_eq!(sub.style, "");
+        assert_eq!(sub.name, "");
+    }
+
+    #[test]
+    fn legacy_subtitle_builder_drops_missing_timing() {
+        assert!(
+            build_legacy_subtitle(
+                1,
+                "hello".to_string(),
+                [None, Some(3.5)],
+                "movie.mkv".to_string(),
+                1,
+                SubtitleTrack::Primary,
+                0.0,
+            )
+            .is_none()
+        );
+        assert!(
+            build_legacy_subtitle(
+                1,
+                "hello".to_string(),
+                [Some(1.0), None],
+                "movie.mkv".to_string(),
+                1,
+                SubtitleTrack::Primary,
+                0.0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn ass_time_parses_h_mm_ss_cc() {
         assert_eq!(parse_ass_time("0:00:01.50"), Some(1.5));
         assert_eq!(parse_ass_time("0:00:00.00"), Some(0.0));
@@ -702,7 +1093,13 @@ mod tests {
     }
 
     fn key(text: &str) -> SubtitleKey {
-        (SubtitleTrack::Primary, 0, "Default".to_string(), String::new(), text.to_string())
+        (
+            SubtitleTrack::Primary,
+            0,
+            "Default".to_string(),
+            String::new(),
+            text.to_string(),
+        )
     }
 
     #[test]
