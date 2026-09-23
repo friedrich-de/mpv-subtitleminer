@@ -14,6 +14,7 @@ export interface MediaSettings {
   audioAdvanced: boolean
   audioAdvancedArgs: string
   audioAdvancedExtension: string
+  playAudioOnAdd: boolean
 }
 
 export interface WordCardSettings {
