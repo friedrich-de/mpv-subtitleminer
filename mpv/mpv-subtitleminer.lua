@@ -32,6 +32,34 @@ end
 
 local platform = mp.get_property_native("platform")
 
+-- The server reads sub-text/ass-full, which only exists since mpv 0.39.0. Probing the
+-- property is unreliable: before a subtitle track is loaded, old and new mpv both answer
+-- "property unavailable". So compare the version string instead.
+local function check_mpv_version()
+  local version = mp.get_property("mpv-version", "")
+  local major, minor = version:match("(%d+)%.(%d+)")
+  if not major then
+    mp.msg.warn("Could not parse mpv version '" .. version .. "', skipping version check")
+    return nil
+  end
+  if tonumber(major) == 0 and tonumber(minor) < 39 then
+    return "mpv 0.39.0 or newer is required (you have " .. version .. ")"
+  end
+  mp.msg.info("mpv version OK: " .. version)
+  return nil
+end
+
+-- nil when mpv is new enough, otherwise the error text
+local version_error = check_mpv_version()
+
+-- mpv shows one OSD message at a time, so status messages must not replace the
+-- version error. Everything that would show a status goes through this.
+local function show_version_error()
+  mp.msg.error(version_error)
+  mp.osd_message("[mpv-subtitleminer] " .. version_error
+    .. "\nSubtitles can't reach the page until you update mpv.", 15)
+end
+
 local config_file_path = mp.find_config_file("mpv.conf")
 if not config_file_path then
   mp.osd_message("[mpv-subtitleminer] Could not find mpv.conf", 5)
@@ -262,7 +290,11 @@ local function try_start_on_port(port_index)
       if server_process then
         server_running = true
         mp.msg.info("Server confirmed running on port " .. port)
-        mp.osd_message("[mpv-subtitleminer] server started on port " .. port, 3)
+        if version_error then
+          show_version_error()
+        else
+          mp.osd_message("[mpv-subtitleminer] server started on port " .. port, 3)
+        end
       end
     end)
   else
@@ -272,13 +304,21 @@ local function try_start_on_port(port_index)
 end
 
 local function start_server()
+  -- Warn, but still start the server: it forwards the same error to the page,
+  -- which otherwise would just keep retrying the connection.
+  if version_error then
+    show_version_error()
+  end
+
   if server_running or server_process then
     mp.osd_message("[mpv-subtitleminer] Server already running on port " .. (current_port or "unknown"), 2)
     return
   end
 
   mp.msg.info("Starting mpv-subtitleminer server...")
-  mp.osd_message("[mpv-subtitleminer] Starting server...", 2)
+  if not version_error then
+    mp.osd_message("[mpv-subtitleminer] Starting server...", 2)
+  end
 
   try_start_on_port(1)
 end
