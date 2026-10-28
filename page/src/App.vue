@@ -1268,8 +1268,16 @@
     void audio.play()
   }
 
-  const generateMediaFilename = (msgId: number, type: 'audio' | 'image') => {
-    const timestamp = Date.now()
+  // Subtitle start as `1h02m03`: readable and safe in filenames on every OS.
+  const formatMediaStart = (seconds: number) => {
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor(seconds / 60) % 60
+    const s = (Math.floor(seconds) % 60).toString().padStart(2, '0')
+    return h ? `${h}h${m.toString().padStart(2, '0')}m${s}s` : `${m}m${s}s`
+  }
+
+  const generateMediaFilename = (msg: SubtitleMessage, type: 'audio' | 'image') => {
+    const timestamp = Date.now().toString(36)
     const media = showSettings.value ? localMedia.value : settings.value.media
     let ext = 'webp'
 
@@ -1291,7 +1299,7 @@
     if (ext.toLowerCase() === 'jpeg') ext = 'jpg'
     ext = ext.replace(/^\.+/, '')
 
-    return `mpv_subtitleminer_${msgId}_${timestamp}.${ext.toLowerCase()}`
+    return `mpv_subtitleminer_${formatMediaStart(msg.sub_start)}_${timestamp}.${ext.toLowerCase()}`
   }
 
   // Fetch/store the audio clip and thumbnail for the selection and return the
@@ -1301,7 +1309,6 @@
     primaryMsgs: SubtitleMessage[],
     first: SubtitleMessage | undefined,
     last: SubtitleMessage | undefined,
-    mediaId: number,
     audioField: string,
     imageField: string,
   ): Promise<Record<string, string>> {
@@ -1325,7 +1332,7 @@
           : first.audio || (await requestMediaFromServer(first, 'audio'))
 
       if (audioData) {
-        const filename = generateMediaFilename(mediaId, 'audio')
+        const filename = generateMediaFilename(first, 'audio')
         await anki.storeMediaFile(filename, audioData)
         fields[audioField] = `[sound:${filename}]`
       }
@@ -1343,7 +1350,7 @@
         )
       }
       if (imageData) {
-        const filename = generateMediaFilename(mediaId, 'image')
+        const filename = generateMediaFilename(first, 'image')
         await anki.storeMediaFile(filename, imageData)
         fields[imageField] = `<img src="${filename}">`
       }
@@ -1361,7 +1368,6 @@
     secondaryMsgs: SubtitleMessage[]
     first: SubtitleMessage | undefined
     last: SubtitleMessage | undefined
-    mediaId: number
   }
 
   // Shared scaffolding for the word-card and sentence-card flows: selection and
@@ -1383,12 +1389,11 @@
     const anchor = primaryMsgs[0] ?? secondaryMsgs[0]
     if (!anchor) return
     const anchorKey = anchor.uid
-    const mediaId = first?.id ?? anchor.id
     sendingToAnki.value[anchorKey] = true
     ankiError.value[anchorKey] = ''
 
     try {
-      const noteId = await run({ primaryMsgs, secondaryMsgs, first, last, mediaId })
+      const noteId = await run({ primaryMsgs, secondaryMsgs, first, last })
       if (noteId === null) return
       ankiSuccess.value[anchorKey] = true
       const count = primaryMsgs.length + secondaryMsgs.length
@@ -1419,7 +1424,7 @@
     await runCardFlow(
       'Failed to add to Anki',
       (count) => `Added ${count} subtitle(s) to Anki`,
-      async ({ primaryMsgs, secondaryMsgs, first, last, mediaId }) => {
+      async ({ primaryMsgs, secondaryMsgs, first, last }) => {
         const { sentenceField, secondaryField, audioField, imageField } = settings.value.anki.word
 
         const targetNote = await anki.getLastNote(settings.value.anki.word.noteType)
@@ -1458,7 +1463,7 @@
 
         Object.assign(
           fieldUpdates,
-          await buildMediaFields(primaryMsgs, first, last, mediaId, audioField, imageField),
+          await buildMediaFields(primaryMsgs, first, last, audioField, imageField),
         )
 
         if (Object.keys(fieldUpdates).length === 0) return null
@@ -1493,7 +1498,7 @@
     await runCardFlow(
       'Failed to create sentence card',
       (count) => `Created sentence card from ${count} subtitle(s)`,
-      async ({ primaryMsgs, secondaryMsgs, first, last, mediaId }) => {
+      async ({ primaryMsgs, secondaryMsgs, first, last }) => {
         const {
           deck,
           noteType,
@@ -1522,7 +1527,7 @@
 
         Object.assign(
           fields,
-          await buildMediaFields(primaryMsgs, first, last, mediaId, audioField, imageField),
+          await buildMediaFields(primaryMsgs, first, last, audioField, imageField),
         )
 
         return await anki.addNote(deck, noteType, fields, tags)
