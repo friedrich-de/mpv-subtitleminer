@@ -185,11 +185,15 @@ struct SharedState {
     /// Held here (not just in `handle_mpv`) so a client `clear` request can reset
     /// it; reset on media change.
     recent: Mutex<RecentSubtitles>,
+    /// mpv IPC socket, for short-lived side connections that query playback state
+    /// (the main connection is owned by `handle_mpv`'s read loop).
+    socket_path: String,
 }
 
 impl SharedState {
-    fn new() -> Arc<Self> {
+    fn new(socket_path: &str) -> Arc<Self> {
         Arc::new(Self {
+            socket_path: socket_path.to_string(),
             subtitles: RwLock::new(HashMap::new()),
             current_media_path: RwLock::new(None),
             recent: Mutex::new(RecentSubtitles::new(512)),
@@ -241,6 +245,15 @@ async fn query_mpv_property_with_timeout(
             format!("Timed out querying mpv property '{}'", property),
         )
     })?
+}
+
+/// Current playback position in seconds, read over a fresh IPC connection.
+async fn query_time_pos(socket_path: &str) -> std::io::Result<f64> {
+    let mut mpv = MpvStream::connect(socket_path).await?;
+    let json = query_mpv_property_with_timeout(&mut mpv, "time-pos", 1).await?;
+    json.get("data").and_then(|d| d.as_f64()).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "mpv returned no time-pos")
+    })
 }
 
 async fn get_mpv_pid(mpv: &mut MpvStream) -> std::io::Result<u32> {
@@ -298,7 +311,7 @@ pub async fn run_server(
             .map_or_else(|_| format!("port {}", port), |a| a.to_string())
     );
 
-    let state = SharedState::new();
+    let state = SharedState::new(socket_path);
     let (subtitle_tx, _) = broadcast::channel::<SubtitleEvent>(64);
 
     let mpv_state = state.clone();
@@ -543,6 +556,11 @@ enum ProtocolRequest {
         offset_end: Option<f64>,
         audio_config: Option<crate::media::AudioConfig>,
     },
+    /// Still image at the player's current position rather than at a subtitle's time.
+    Screenshot {
+        request_id: u64,
+        image_config: Option<crate::media::ImageConfig>,
+    },
     /// The UI "clear" button: reset the dedup set so already-seen subtitles can
     /// stream in again (e.g. after clearing the screen and seeking back).
     Clear,
@@ -556,6 +574,40 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
             state.recent.lock().await.clear();
             info!("[client:{}] Cleared subtitle dedup set", client_id);
             None
+        }
+        ProtocolRequest::Screenshot {
+            request_id,
+            image_config,
+        } => {
+            let media_path = state.current_media_path.read().await.clone();
+            let data = match (media_path, query_time_pos(&state.socket_path).await) {
+                (Some(media_path), Ok(time_pos)) => {
+                    info!("[client:{}] Requesting screenshot at {:.3}", client_id, time_pos);
+                    let config = crate::media::ImageConfig {
+                        is_animated: false,
+                        ..image_config.unwrap_or_default()
+                    };
+                    let ffmpeg_req = FfmpegRequest::image_at(time_pos, 0.0, &media_path, config);
+                    tokio::task::spawn_blocking(move || ffmpeg_req.execute())
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                _ => {
+                    warn!("[client:{}] Screenshot failed", client_id);
+                    None
+                }
+            };
+
+            // Always answer so the client's pending request settles, even on failure.
+            Some(
+                serde_json::json!({
+                    "type": "screenshot",
+                    "request_id": request_id,
+                    "data": data,
+                })
+                .to_string(),
+            )
         }
         ProtocolRequest::AudioRange {
             start_id,

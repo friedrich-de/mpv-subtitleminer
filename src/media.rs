@@ -88,10 +88,10 @@ impl ImageConfig {
         }
     }
 
-    pub fn apply_to_args(&self, args: &mut Vec<String>, sub: &Subtitle) {
+    pub fn apply_to_args(&self, args: &mut Vec<String>, duration: f64) {
         if let Some(advanced) = &self.advanced_args {
             if self.is_animated {
-                args.extend(["-t".into(), format!("{:.3}", sub.sub_end - sub.sub_start)]);
+                args.extend(["-t".into(), format!("{:.3}", duration)]);
             } else {
                 args.extend(["-vframes".into(), "1".into()]);
             }
@@ -100,7 +100,7 @@ impl ImageConfig {
         }
 
         if self.is_animated {
-            args.extend(["-t".into(), format!("{:.3}", sub.sub_end - sub.sub_start)]);
+            args.extend(["-t".into(), format!("{:.3}", duration)]);
         } else {
             args.extend(["-vframes".into(), "1".into()]);
         }
@@ -222,27 +222,29 @@ pub struct FfmpegRequest {
 impl FfmpegRequest {
     pub fn thumbnail(sub: &Subtitle, config: Option<ImageConfig>) -> Self {
         let config = config.unwrap_or_default();
-        let is_animated = config.is_animated;
+        let mid_time = (sub.sub_start + sub.sub_end) / 2.0;
+        let ss = if config.is_animated { sub.sub_start } else { mid_time };
+        Self::image_at(ss, sub.sub_end - sub.sub_start, &sub.media_path, config)
+    }
 
+    /// A still frame at `time`, or an animation of `duration` seconds starting there.
+    pub fn image_at(time: f64, duration: f64, media_path: &str, config: ImageConfig) -> Self {
         let ext = config.get_extension();
         let output = temp_path("thumb", ext);
-        let mid_time = (sub.sub_start + sub.sub_end) / 2.0;
 
         debug!(
             "[media] Thumbnail ({}) at {:.3} from {}",
-            config.format, mid_time, sub.media_path
+            config.format, time, media_path
         );
-
-        let ss = if is_animated { sub.sub_start } else { mid_time };
 
         let mut args = vec![
             "-ss".into(),
-            format!("{:.3}", ss),
+            format!("{:.3}", time.max(0.0)),
             "-i".into(),
-            sub.media_path.clone(),
+            media_path.to_string(),
         ];
 
-        config.apply_to_args(&mut args, sub);
+        config.apply_to_args(&mut args, duration);
 
         args.extend(["-y".into(), output.display().to_string()]);
         Self {
