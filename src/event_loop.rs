@@ -272,6 +272,38 @@ async fn get_mpv_pid(mpv: &mut MpvStream) -> std::io::Result<u32> {
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "mpv PID out of range"))
 }
 
+/// Returns `(major, minor)` from mpv version strings like "mpv 0.38.0",
+/// "mpv v0.39.0-12-gabcdef" or "mpv v0.40.0-dev".
+fn parse_mpv_version(version: &str) -> Option<(u32, u32)> {
+    let start = version.find(|c: char| c.is_ascii_digit())?;
+    let mut parts = version[start..].split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// `sub-text/ass-full`, which subtitle streaming depends on, exists since mpv 0.39.0.
+/// Returns the version string when mpv is older than that.
+async fn mpv_too_old(mpv: &mut MpvStream) -> Option<String> {
+    let json = match query_mpv_property_with_timeout(mpv, "mpv-version", 3).await {
+        Ok(json) => json,
+        Err(e) => {
+            warn!("Could not query mpv version: {}", e);
+            return None;
+        }
+    };
+    let version = json.get("data").and_then(|d| d.as_str())?.to_string();
+    info!("Connected to {}", version);
+    match parse_mpv_version(&version) {
+        Some(v) if v < (0, 39) => Some(version),
+        Some(_) => None,
+        None => {
+            warn!("Could not parse mpv version '{}', skipping version check", version);
+            None
+        }
+    }
+}
+
 pub async fn run_server(
     socket_path: &str,
     port: u16,
@@ -289,6 +321,15 @@ pub async fn run_server(
             ));
         }
     }
+    let too_old_version = mpv_too_old(&mut mpv).await;
+    if let Some(version) = &too_old_version {
+        eprintln!(
+            "MPV_TOO_OLD: {} is too old, mpv 0.39.0 or newer is required (sub-text/ass-full is missing)",
+            version
+        );
+    }
+    let too_old_version = Arc::new(too_old_version);
+
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
 
     println!(
@@ -319,10 +360,11 @@ pub async fn run_server(
 
         let client_state = state.clone();
         let client_rx = subtitle_tx.subscribe();
+        let client_too_old = too_old_version.clone();
 
         tokio::spawn(async move {
             info!("[client:{}] Connected from {}", id, addr);
-            if let Err(e) = handle_client(stream, id, client_state, client_rx).await {
+            if let Err(e) = handle_client(stream, id, client_state, client_rx, &client_too_old).await {
                 debug!("[client:{}] Disconnected: {}", id, e);
             } else {
                 debug!("[client:{}] Disconnected", id);
@@ -475,12 +517,24 @@ async fn handle_client(
     id: u64,
     state: Arc<SharedState>,
     mut subtitle_rx: broadcast::Receiver<SubtitleEvent>,
+    too_old_version: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws = accept_async(stream).await?;
     let (mut ws_tx, mut ws_rx) = ws.split();
 
     if let Some(path) = state.current_media_path.read().await.clone() {
         let msg = serde_json::json!({ "type": "media_changed", "path": path });
+        ws_tx.send(Message::Text(msg.to_string().into())).await?;
+    }
+
+    if let Some(version) = too_old_version {
+        let msg = serde_json::json!({
+            "type": "error",
+            "message": format!(
+                "Your mpv is too old ({}). mpv-subtitleminer needs mpv 0.39.0 or newer to read subtitles.",
+                version
+            ),
+        });
         ws_tx.send(Message::Text(msg.to_string().into())).await?;
     }
 
@@ -665,6 +719,16 @@ async fn handle_request(text: &str, client_id: u64, state: &Arc<SharedState>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mpv_version_parses() {
+        assert_eq!(parse_mpv_version("mpv 0.38.0"), Some((0, 38)));
+        assert_eq!(parse_mpv_version("mpv v0.39.0-12-gabcdef"), Some((0, 39)));
+        assert_eq!(parse_mpv_version("mpv v0.40.0-dev"), Some((0, 40)));
+        assert_eq!(parse_mpv_version("mpv git"), None);
+        assert!(parse_mpv_version("mpv 0.38.0").unwrap() < (0, 39));
+        assert!(parse_mpv_version("mpv 1.0.0").unwrap() >= (0, 39));
+    }
 
     #[test]
     fn ass_time_parses_h_mm_ss_cc() {

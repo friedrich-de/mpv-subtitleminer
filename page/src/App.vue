@@ -873,6 +873,9 @@
     return title ? `source:${title}` : ''
   }
 
+  // Persistent server-side problem (e.g. mpv too old), shown in place of the empty-state text.
+  const serverError = ref<string | null>(null)
+
   const ws = useWebSocket({
     host,
     ports,
@@ -894,6 +897,12 @@
           clearMessages()
         }
         document.title = path ? titleFromMediaPath(path) : 'Subtitle Tool Page'
+        return
+      }
+
+      if (type === 'error') {
+        serverError.value = asString(d.message) || 'Server reported an error'
+        toast.error(serverError.value, { duration: 15000 })
         return
       }
 
@@ -1694,7 +1703,9 @@
     </header>
 
     <main ref="mainRef" class="main">
-      <div v-if="messages.length === 0" class="empty">Waiting for subtitles...</div>
+      <div v-if="messages.length === 0" class="empty">
+        {{ serverError ?? 'Waiting for subtitles...' }}
+      </div>
       <div
         v-else
         class="timeline"
