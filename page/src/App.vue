@@ -83,6 +83,7 @@
       audioAdvanced: false,
       audioAdvancedArgs: '',
       audioAdvancedExtension: '',
+      playAudioOnAdd: true,
     },
   }
 
@@ -913,12 +914,15 @@
         if (!media) return
 
         const msg = messages.value.find((m) => m.id === media.id && m.sourcePort === port)
+        // Cache only. Playback is decided by whoever asked for the clip (the row's play
+        // button, or the card flow when playAudioOnAdd is on) - a multi-line selection comes
+        // back as `audio_range` instead, so playing from here would only ever cover the
+        // single-line case.
         if (msg) {
           if (type === 'thumbnail') {
             msg.thumbnail = media.data
           } else {
             msg.audio = media.data
-            playAudio(media.data)
           }
         }
         const key = `${type === 'thumbnail' ? 'thumb' : 'audio'}-${port}-${media.id}`
@@ -1211,24 +1215,18 @@
     }
   })
 
-  const requestAudio = (msg: SubtitleMessage) => {
+  const requestAudio = async (msg: SubtitleMessage) => {
     if (ws.status.value !== 'connected') return
     if (msg.audio) {
       playAudio(msg.audio)
       return
     }
-    const key = `audio-${msg.uid}`
-    if (loadingMedia.value[key]) return
-    const payload: Record<string, JsonValue> = {
-      request: 'audio',
-      id: msg.id,
-      ...getAudioParams(),
-    }
-    if (!sendToPort(payload, msg.sourcePort)) {
-      toast.error(`Not connected to port ${msg.sourcePort}`)
+    const audioData = await requestMediaFromServer(msg, 'audio')
+    if (audioData) {
+      playAudio(audioData)
       return
     }
-    loadingMedia.value[key] = true
+    toast.error(`Could not fetch audio from port ${msg.sourcePort}`)
   }
 
   const requestSelectionAudioRange = async () => {
@@ -1325,6 +1323,10 @@
           : first.audio || (await requestMediaFromServer(first, 'audio'))
 
       if (audioData) {
+        // Preview the exact clip going onto the card - one continuous span for a
+        // multi-line selection, the single line otherwise. Ahead of the Anki round
+        // trip so the playback isn't gated on it.
+        if (settings.value.media.playAudioOnAdd) playAudio(audioData)
         const filename = generateMediaFilename(mediaId, 'audio')
         await anki.storeMediaFile(filename, audioData)
         fields[audioField] = `[sound:${filename}]`

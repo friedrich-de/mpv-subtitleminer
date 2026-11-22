@@ -1,5 +1,6 @@
 <script setup lang="ts">
   import { computed } from 'vue'
+  import ToggleSwitch from './ToggleSwitch.vue'
   import type { MediaSettings, Settings } from '../types/settings'
 
   const props = defineProps<{
@@ -155,13 +156,7 @@
 
     <div class="full-width section-subheader-row">
       <span class="section-label">Image Settings</span>
-      <div class="advanced-toggle">
-        <span class="toggle-label">Advanced</span>
-        <label class="switch">
-          <input v-model="localMedia.imageAdvanced" type="checkbox" />
-          <span class="slider"></span>
-        </label>
-      </div>
+      <ToggleSwitch v-model="localMedia.imageAdvanced" label="Advanced" />
     </div>
 
     <template v-if="!localMedia.imageAdvanced">
@@ -215,17 +210,11 @@
     </template>
     <template v-else>
       <div class="advanced-row-header">
-        <label class="form-group extension-box">
+        <label class="extension-field">
           <span>Extension</span>
           <input v-model="localMedia.imageAdvancedExtension" type="text" placeholder="jpg" />
         </label>
-        <div class="advanced-toggle animated-switch-box">
-          <span class="toggle-label">Animated</span>
-          <label class="switch">
-            <input v-model="localMedia.imageAnimated" type="checkbox" />
-            <span class="slider"></span>
-          </label>
-        </div>
+        <ToggleSwitch v-model="localMedia.imageAnimated" label="Animated" />
       </div>
       <label class="form-group full-width">
         <span>Raw FFmpeg Arguments</span>
@@ -237,13 +226,7 @@
 
     <div class="full-width section-subheader-row">
       <span class="section-label">Audio Settings</span>
-      <div class="advanced-toggle">
-        <span class="toggle-label">Advanced</span>
-        <label class="switch">
-          <input v-model="localMedia.audioAdvanced" type="checkbox" />
-          <span class="slider"></span>
-        </label>
-      </div>
+      <ToggleSwitch v-model="localMedia.audioAdvanced" label="Advanced" />
     </div>
 
     <template v-if="!localMedia.audioAdvanced">
@@ -297,6 +280,18 @@
         />
       </label>
     </template>
+
+    <!-- Applies to both the simple and advanced encoders, so it sits outside both branches. -->
+    <div class="full-width toggle-row">
+      <div class="toggle-row-text">
+        <span class="toggle-row-label">Play audio when adding a card</span>
+        <small class="field-hint"
+          >Plays the clip being attached to the card. A multi-line selection plays as one continuous
+          span. Needs an audio field configured.</small
+        >
+      </div>
+      <ToggleSwitch v-model="localMedia.playAudioOnAdd" />
+    </div>
   </div>
 </template>
 
@@ -399,19 +394,36 @@
     grid-column: 1 / -1;
   }
 
+  /* A shared label row and control row, so the switch centres against the input itself
+     rather than against the whole Extension field. Flex can't do this: the switch's
+     sibling is the <label>, not the input nested inside it. */
   .advanced-row-header {
-    display: flex;
+    display: grid;
+    grid-template-columns: 100px auto;
+    gap: 6px 20px;
     align-items: center;
-    gap: 20px;
     margin-bottom: 10px;
   }
 
-  .extension-box {
-    width: 100px;
+  /* Keeps the label's click-to-focus while letting the span and input land in the
+     grid rows as if they were direct children. */
+  .extension-field {
+    display: contents;
   }
 
-  .animated-switch-box {
-    margin-top: 15px; /* Alignment with input labels */
+  .extension-field span {
+    grid-area: 1 / 1;
+    font-size: 0.85em;
+    font-weight: 500;
+    color: #a7b4c7;
+  }
+
+  .extension-field input {
+    grid-area: 2 / 1;
+  }
+
+  .advanced-row-header > .toggle-switch {
+    grid-area: 2 / 2;
   }
 
   .separator {
@@ -436,70 +448,33 @@
     letter-spacing: 0.05em;
   }
 
-  .advanced-toggle {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .toggle-label {
-    font-size: 0.85em;
-    color: #7e8898;
-  }
-
-  /* Switch styling */
-  .switch {
-    position: relative;
-    display: inline-block;
-    width: 34px;
-    height: 18px;
-  }
-
-  .switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .slider {
-    position: absolute;
-    cursor: pointer;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: #1f252e;
-    transition: 0.3s;
-    border-radius: 34px;
-    border: 1px solid #2a303b;
-  }
-
-  .slider:before {
-    position: absolute;
-    content: '';
-    height: 12px;
-    width: 12px;
-    left: 2px;
-    bottom: 2px;
-    background-color: #a7b4c7;
-    transition: 0.3s;
-    border-radius: 50%;
-  }
-
-  input:checked + .slider {
-    background-color: #374151;
-    border-color: #4b5563;
-  }
-
-  input:checked + .slider:before {
-    transform: translateX(16px);
-    background-color: #3ddc97;
-  }
-
   .field-hint {
     color: #7e8898;
     font-size: 0.85em;
     margin-top: -4px;
     display: block;
+  }
+
+  .toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+
+  /* Lets the hint wrap rather than push against the switch. */
+  .toggle-row-text {
+    min-width: 0;
+  }
+
+  .toggle-row-label {
+    display: block;
+    font-size: 0.85em;
+    font-weight: 500;
+    color: #a7b4c7;
+  }
+
+  .toggle-row .field-hint {
+    margin-top: 2px;
   }
 </style>
