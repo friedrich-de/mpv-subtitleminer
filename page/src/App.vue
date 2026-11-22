@@ -1026,19 +1026,48 @@
   const isSelected = (uid: string) => selectedMessages.value.has(uid)
   const isSelectedSecondary = (uid: string) => selectedSecondary.value.has(uid)
 
-  // Free selection within a column: clicking toggles a block in or out, with no contiguity
-  // requirement. Audio still spans the earliest selected start to the latest selected end as
-  // one continuous clip (see getSelectionRange + requestAudioRange), so non-adjacent picks
-  // include the gap between them rather than concatenating per-block clips.
-  const toggleInColumn = (target: Ref<Set<string>>, msg: SubtitleMessage) => {
+  // A column's selection must stay one contiguous run of (visible) blocks, so a click may only
+  // extend or trim the run at its ends. A column's first pick, made while the other column
+  // already has a selection, must overlap one of those selected blocks in time.
+  const isContiguous = (column: SubtitleMessage[], selected: Set<string>): boolean => {
+    const indices = column.flatMap((m, i) => (selected.has(m.uid) ? [i] : []))
+    return indices.every((idx, i) => i === 0 || idx === indices[i - 1]! + 1)
+  }
+
+  const overlaps = (a: SubtitleMessage, b: SubtitleMessage) =>
+    a.sub_start < b.sub_end && b.sub_start < a.sub_end
+
+  const toggleInColumn = (
+    target: Ref<Set<string>>,
+    column: SubtitleMessage[],
+    other: SubtitleMessage[],
+    msg: SubtitleMessage,
+  ) => {
     const selected = new Set(target.value)
-    if (selected.has(msg.uid)) selected.delete(msg.uid)
-    else selected.add(msg.uid)
+    if (selected.has(msg.uid)) {
+      selected.delete(msg.uid)
+      if (!isContiguous(column, selected)) {
+        toast.warning('Only the first or last selected subtitle can be deselected.')
+        return
+      }
+    } else {
+      if (selected.size === 0 && other.length > 0 && !other.some((m) => overlaps(m, msg))) {
+        toast.warning('Subtitle must overlap in time with the selection in the other column.')
+        return
+      }
+      selected.add(msg.uid)
+      if (!isContiguous(column, selected)) {
+        toast.warning('Only subtitles adjacent to the current selection can be selected.')
+        return
+      }
+    }
     target.value = selected
   }
 
-  const togglePrimary = (msg: SubtitleMessage) => toggleInColumn(selectedMessages, msg)
-  const toggleSecondary = (msg: SubtitleMessage) => toggleInColumn(selectedSecondary, msg)
+  const togglePrimary = (msg: SubtitleMessage) =>
+    toggleInColumn(selectedMessages, primaryMessages.value, getSelectedSecondaryMessages(), msg)
+  const toggleSecondary = (msg: SubtitleMessage) =>
+    toggleInColumn(selectedSecondary, secondaryMessages.value, getSelectedMessages(), msg)
 
   const clearSelection = () => {
     selectedMessages.value = new Set()
